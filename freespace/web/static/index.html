@@ -1,0 +1,1235 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FreeSpace</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280;
+    --line: rgba(128,128,128,.28); --panel: rgba(128,128,128,.07);
+    --accent: #4F86C6; --bad: #cf222e; --ok: #1a7f37; --warn: #9a6700;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17191c; --fg: #e6e6e6; --muted: #9aa0a6; --panel: rgba(255,255,255,.05);
+            --bad: #ff7b72; --ok: #3fb950; --warn: #d29922; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); height: 100vh;
+         display: flex; flex-direction: column; overflow: hidden;
+         font: 15.5px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; }
+
+  header { padding: 10px 14px; border-bottom: 1px solid var(--line); flex: none; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  input[type=text], input[type=number], select {
+    font: inherit; padding: 6px 9px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--bg); color: inherit; }
+  input#path { flex: 1; min-width: 220px; }
+  input#q { flex: 1; min-width: 180px; }
+  button { font: inherit; padding: 6px 13px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: inherit; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.danger { color: var(--bad); }
+  /* Разрушающее действие: заливка, а не только цвет текста — иначе на синей
+     кнопке «primary» получается нечитаемый красный поверх синего. */
+  button.destructive { background: var(--bad); color: #fff; border-color: var(--bad); }
+  button.small { padding: 2px 8px; font-size: 12px; }
+  label.opt { display: inline-flex; gap: 6px; align-items: center;
+              font-size: 13.5px; color: var(--muted); cursor: pointer; }
+  .chips { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+  .chip { font-size: 13px; padding: 4px 11px; border-radius: 999px;
+    border: 1px solid var(--line); cursor: pointer; background: var(--panel); }
+  .chip:hover { border-color: var(--accent); }
+  .chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .status { font-size: 14px; color: var(--muted); margin-top: 7px; min-height: 21px; }
+  .status b { color: var(--fg); font-weight: 600; }
+  .err { color: var(--bad); }
+  .note { font-size: 13px; color: var(--warn); }
+  .hidden { display: none !important; }
+
+  #filters { margin-top: 8px; gap: 6px; font-size: 13.5px; color: var(--muted); }
+  #filters input[type=number] { width: 122px; }
+  #filters select { font-size: 13.5px; padding: 5px 7px; }
+
+  nav { padding: 8px 14px; border-bottom: 1px solid var(--line); font-size: 14px;
+        flex: none; display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  nav a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+  nav span.sep { color: var(--muted); }
+
+  /* Полоса хода долгих операций. Не модальная: перенос большой папки в корзину
+     идёт десятками секунд, и всё это время интерфейсом можно пользоваться. */
+  /* Высота задана жёстко и не зависит от того, идёт ли что-нибудь: место
+     занято всегда, поэтому появление полосы ничего не сдвигает. Пока работы
+     нет, панель невидима — но не убрана из потока. */
+  #progress { flex: none; height: 72px; overflow: hidden; padding: 9px 12px;
+              font-size: 13px; border-top: 1px solid var(--accent);
+              background: rgba(79,134,198,.13); }
+  #progress.off { visibility: hidden; }
+  .pg-top { display: flex; gap: 8px; align-items: baseline; }
+  .pg-title { font-weight: 600; white-space: nowrap; overflow: hidden;
+              text-overflow: ellipsis; }
+  /* Точка рядом с заголовком мигает всё время работы. Полоса на длинной
+     операции может подолгу стоять на месте, и без движущейся детали она
+     неотличима от подписи, которую просто забыли убрать. */
+  .pg-title::before { content: '●'; color: var(--accent); margin-right: 7px;
+                      animation: pg-pulse 1s ease-in-out infinite; }
+  @keyframes pg-pulse { 50% { opacity: .25; } }
+  .pg-count { margin-left: auto; color: var(--muted); white-space: nowrap;
+              flex: none; font-variant-numeric: tabular-nums; }
+  .pg-track { height: 8px; border-radius: 4px; background: var(--line);
+              overflow: hidden; margin: 7px 0 5px; }
+  .pg-fill { height: 100%; width: 0; background: var(--accent); border-radius: 4px;
+             transition: width .2s linear; }
+  /* Пока объём работы неизвестен, полоса не выдумывает проценты, а показывает
+     единственное, что известно точно: работа идёт. */
+  .pg-track.wait .pg-fill { width: 30%; transition: none;
+                            animation: pg-run 1.2s ease-in-out infinite; }
+  @keyframes pg-run { from { transform: translateX(-110%); }
+                        to { transform: translateX(345%); } }
+  .pg-path { color: var(--muted); white-space: nowrap; overflow: hidden;
+             text-overflow: ellipsis; }
+  .pg-path b { color: var(--fg); font-weight: 600; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  #mapwrap { flex: 1; min-width: 0; padding: 10px; }
+  #map { width: 100%; height: 100%; display: block; }
+  /* Нажатие что-то делает не на всякой плитке: у «остального» за спиной сотни
+     объектов, вести к одному из них не к чему. */
+  #map rect { cursor: default; }
+  #map rect[data-go], #map rect[data-locate] { cursor: pointer; }
+  #map text { pointer-events: none; user-select: none; }
+  /* Папка и файл различаются не только курсором: у папки полная заливка и
+     светлая рамка, у файла — приглушённая заливка без рамки. Одного курсора
+     мало, его видно только под указателем. */
+  #map rect.dir { stroke: rgba(255,255,255,.6); stroke-width: 1; }
+  #map rect[data-go]:hover, #map rect[data-locate]:hover {
+    stroke: var(--fg); stroke-width: 2; }
+  #map rect.hl { stroke: var(--fg); stroke-width: 2.5; }
+
+  /* Панель широкая: в ней живут полные пути, а перенос пути на три строки
+     читать невозможно. Ограничение по доле экрана — чтобы на ноутбуке карта
+     не выродилась в полоску. */
+  aside { width: 575px; max-width: 45%; flex: none; border-left: 1px solid var(--line);
+          display: flex; flex-direction: column; min-height: 0; }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); flex: none; }
+  .tabs button { border: none; border-radius: 0; background: none; flex: 1;
+                 border-bottom: 2px solid transparent; padding: 10px 4px; font-size: 15px; }
+  .tabs button.on { border-bottom-color: var(--accent); color: var(--accent); }
+  .pane { flex: 1; overflow-y: auto; padding: 10px 12px; }
+  @media (max-width: 1100px) {
+    main { flex-direction: column; }
+    aside { width: auto; border-left: none; border-top: 1px solid var(--line); max-height: 50%; }
+    #mapwrap { min-height: 260px; }
+  }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th { text-align: left; font-weight: 600; color: var(--muted); font-size: 13px;
+       padding: 5px 6px 7px 0; border-bottom: 1px solid var(--line); }
+  td { padding: 6px 6px 6px 0; border-bottom: 1px solid var(--line);
+       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; width: 82px; max-width: none; }
+  td.pct { text-align: right; width: 48px; max-width: none; opacity: .65; }
+  td.act { width: 62px; max-width: none; text-align: right; }
+  tr.dir td.name { color: var(--accent); cursor: pointer; }
+  tr.dir td.name:hover { text-decoration: underline; }
+  tr:hover td.act .rowbtn { visibility: visible; }
+  .rowbtn { visibility: hidden; border: none; background: none; cursor: pointer;
+            padding: 0 3px; font-size: 15px; opacity: .75; }
+  .rowbtn:hover { opacity: 1; }
+  .bar { height: 3px; background: var(--accent); border-radius: 2px; margin-top: 2px; }
+  /* Строка, на которую показали с карты. Вспышка гаснет за секунду, слабая
+     заливка остаётся: иначе, пока список прокручивается, подсветка успевает
+     погаснуть до того, как строка появится на экране. */
+  tr.hl > td { background: rgba(79,134,198,.18); animation: hl-flash 1.1s ease-out; }
+  tr.hl td.name { font-weight: 600; }
+  @keyframes hl-flash { from { background: rgba(79,134,198,.6); }
+                          to { background: rgba(79,134,198,.18); } }
+  td.name[data-locate] { cursor: pointer; }
+  td.name[data-locate]:hover { text-decoration: underline; }
+  td.chk { width: 26px; max-width: none; padding-right: 0; }
+  td.chk input, th.chk input { cursor: pointer; margin: 0; }
+  th.chk { width: 26px; }
+  .selbar { position: sticky; top: 0; z-index: 2; background: var(--bg);
+            padding: 8px 0; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+  .selbar.idle .btn-del-selected { visibility: hidden; pointer-events: none; }
+  .sel-error { flex-basis: 100%; }
+  tr.group td.name { cursor: pointer; }
+  tr.group td.name:hover { color: var(--accent); }
+  .caret { display: inline-block; width: 13px; color: var(--muted);
+           transition: transform .12s; }
+  tr.group.open .caret { transform: rotate(90deg); }
+  tr.items > td { padding: 0 0 10px 0; }
+  .items-box { border-left: 2px solid var(--line); padding-left: 10px; margin-left: 4px; }
+  .sub { font-size: 12.5px; color: var(--muted); }
+  .empty { color: var(--muted); padding: 20px 4px; text-align: center; line-height: 1.55; }
+  .empty small { display: block; margin-top: 8px; font-size: 13px; opacity: .8; }
+  .summary { font-size: 13px; color: var(--muted); padding-bottom: 10px; }
+
+  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+           color: var(--fg); padding: 18px 20px; max-width: 460px; font: inherit; }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h3 { margin: 0 0 10px; font-size: 17px; }
+  /* Перечень путей приходит со переводами строк — они должны остаться
+     переводами строк, иначе десяток путей слипается в кашу. */
+  dialog p { margin: 0 0 8px; word-break: break-all; white-space: pre-line;
+             max-height: 34vh; overflow-y: auto; }
+  .dlg-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="row">
+    <input type="text" id="path" placeholder="путь к папке или диску, например /Users/имя"
+           spellcheck="false" title="Папка, содержимое которой нужно разобрать. Можно выбрать одну из кнопок ниже.">
+    <button class="primary" id="btn-scan"
+            title="Обойти папку. Если она уже разбиралась раньше, результат покажется сразу из сохранённого снимка.">Сканировать</button>
+    <button id="btn-rescan"
+            title="Обойти папку заново, не доверяя сохранённому снимку. Нужно, если файлы с прошлого раза изменились.">Пересканировать</button>
+    <button id="btn-cancel" disabled
+            title="Прервать обход. То, что успели посчитать, останется на экране.">Отмена</button>
+  </div>
+  <div class="chips" id="chips"></div>
+  <div class="status" id="status"></div>
+</header>
+
+<nav id="crumbs"></nav>
+
+<main>
+  <div id="mapwrap"><svg id="map"></svg></div>
+  <aside>
+    <div class="tabs">
+      <button data-tab="children" class="on">Содержимое</button>
+      <button data-tab="search">Поиск</button>
+      <button data-tab="trash">Корзина</button>
+    </div>
+
+    <div class="pane" id="pane-children"><div class="empty">Выберите папку и нажмите «Сканировать».
+      <small>После обхода здесь будет список того, что внутри, а слева — карта,
+      где площадь плитки пропорциональна занятому месту.</small></div></div>
+
+    <div class="pane hidden" id="pane-search">
+      <div class="row">
+        <input type="text" id="q" placeholder="имя целиком, часть имени или шаблон вида *.iso"
+               spellcheck="false" title="Что искать по имени. Можно оставить пустым и отобрать только по типу, размеру или дате.">
+        <button class="primary" id="btn-search">Найти</button>
+      </div>
+      <div class="row" id="filters">
+        <select id="f-mode" title="«Часть имени» — найдёт log в error.log. «Шаблон» понимает * и ?: *.iso, отчёт-202?.pdf. «Точное имя» — только полное совпадение, например venv и ничего кроме.">
+          <option value="substring">искать: часть имени</option>
+          <option value="glob">искать: по шаблону с *</option>
+          <option value="exact">искать: имя целиком</option>
+        </select>
+        <select id="f-kind" title="Искать только папки, только файлы или и то и другое.">
+          <option value="all">и папки, и файлы</option>
+          <option value="dirs">только папки</option>
+          <option value="files">только файлы</option>
+        </select>
+        <select id="f-cat" title="Отобрать по виду содержимого — расширение файла подскажет, что это. К папкам не применяется."><option value="">любой вид файлов</option></select>
+        <input type="number" id="f-min" placeholder="больше, МБ" min="0"
+               title="Показывать только то, что больше указанного размера в мегабайтах.">
+        <label class="opt" title="Если целая папка подошла под условие, то и все папки внутри неё подошли автоматически. С галочкой в списке останется только верхняя — её и надо удалять.">
+          <input type="checkbox" id="f-top"> скрывать вложенные результаты</label>
+        <label class="opt" title="Сведёт одноимённые находки в одну строку и покажет, сколько их и сколько они занимают вместе. Так сразу видно общий вес всех venv или всех __pycache__.">
+          <input type="checkbox" id="f-group"> объединять одинаковые имена</label>
+        <label class="opt" title="Искать не по всему просканированному, а только внутри папки, открытой сейчас на карте.">
+          <input type="checkbox" id="f-scope"> искать только в открытой папке</label>
+      </div>
+      <div class="chips" id="presets" title="Готовые наборы условий — нажатие сразу и заполняет поля, и запускает поиск.">
+        <span class="chip" data-preset="big">файлы больше 100 МБ</span>
+        <span class="chip" data-preset="video">видео</span>
+        <span class="chip" data-preset="archive">архивы</span>
+        <span class="chip" data-preset="pycache">__pycache__</span>
+        <span class="chip" data-preset="notebooks">автосохранения Jupyter</span>
+        <span class="chip" data-preset="venv">виртуальные окружения</span>
+      </div>
+      <div id="search-result"><div class="empty">Укажите, что искать, и нажмите «Найти».
+        <small>Или нажмите готовый набор условий выше — например «__pycache__»,
+        чтобы разом собрать весь скомпилированный байткод и убрать его.</small></div></div>
+    </div>
+
+    <div class="pane hidden" id="pane-trash"><div class="empty">Здесь отображаются удалённые объекты.</div></div>
+
+    <!-- Ход операции — под списком, у нижнего края панели: удаляют то, что
+         видят в списке, и следить за работой логично там же, куда смотрели.
+         Место отведено всегда: панель, которая появляется и исчезает, сдвигала
+         бы список, и человек терял бы строку, на которую только что смотрел. -->
+    <div id="progress" class="off">
+      <div class="pg-top">
+        <span class="pg-title" id="pg-title"></span>
+        <span class="pg-count" id="pg-count"></span>
+      </div>
+      <div class="pg-track" id="pg-track"><div class="pg-fill" id="pg-fill"></div></div>
+      <div class="pg-path" id="pg-path"></div>
+    </div>
+  </aside>
+</main>
+
+<dialog id="confirm">
+  <h3 id="confirm-title">Удалить?</h3>
+  <p id="confirm-path"></p>
+  <p class="sub" id="confirm-note"></p>
+  <div class="dlg-actions">
+    <button id="confirm-no">Отмена</button>
+    <button class="destructive" id="confirm-yes">Удалить</button>
+  </div>
+</dialog>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const MB = 1024 * 1024;
+
+let config = {allow_delete: false, local: false, categories: {}};
+let groupItems = new Map();
+// Строки открытой сейчас папки — их тоже можно отмечать и удалять пачкой.
+let lastChildren = [];
+// Куда вернуться после обхода: пересканировав подпапку, оставаться надо в ней,
+// а не выпрыгивать в корень.
+let viewAfterScan = '';
+let jobId = null, rootPath = '', currentPath = '';
+let pollTimer = null, resizeTimer = null, tab = 'children';
+let lastSearch = null;
+
+// Все запросы относительными URL: иначе за jupyter-server-proxy всё отвалится.
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || response.status + ' ' + response.statusText);
+  return body;
+}
+const send = (method, path, data) => api(path, {
+  method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data),
+});
+const postJSON = (path, data) => send('POST', path, data);
+
+function setStatus(html, isError) {
+  $('status').innerHTML = html;
+  $('status').className = 'status' + (isError ? ' err' : '');
+}
+
+function plural(count, one, few, many) {
+  const mod100 = count % 100, mod10 = count % 10;
+  if (mod100 >= 11 && mod100 <= 14) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
+}
+
+function whenText(seconds) {
+  const d = new Date(seconds * 1000);
+  return d.toLocaleString('ru', {day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit'});
+}
+
+// --- запуск --------------------------------------------------------------
+
+// Свободное место спрашиваем у системы заново после каждого действия, которое
+// могло его изменить. Иначе цифра остаётся той, что была на момент открытия
+// страницы, и после очистки корзины на 40 ГБ выглядит так, будто ничего не
+// произошло.
+async function loadVolumes(fillPath) {
+  const vols = await api('api/volumes');
+  // Сервер знает лучше, с чего начинать: в Linux-контейнере это монтирование
+  // с данными, а не служебный домашний каталог.
+  if (fillPath && !$('path').value) $('path').value = vols.default || vols.home || '';
+  $('chips').innerHTML = vols.volumes.map(v =>
+    `<span class="chip" data-pick="${esc(v.path)}"
+       title="Занято ${esc(v.total_human)} всего, свободно ${esc(v.free_human)}">${esc(v.path)}
+     <span style="opacity:.6">${esc(v.free_human)} своб.</span></span>`).join('');
+}
+
+api('api/config').then(cfg => {
+  config = cfg;
+  $('f-cat').innerHTML = '<option value="">любой тип</option>' +
+    Object.entries(cfg.categories).map(([k, label]) =>
+      `<option value="${esc(k)}">${esc(label)}</option>`).join('');
+}).catch(e => setStatus('Не удалось получить настройки: ' + esc(e.message), true));
+
+loadVolumes(true).catch(
+  e => setStatus('Не удалось получить список дисков: ' + esc(e.message), true));
+
+// --- сканирование --------------------------------------------------------
+
+async function startScan(useCache) {
+  const path = $('path').value.trim();
+  if (!path) return;
+  clearInterval(pollTimer);
+  $('btn-scan').disabled = $('btn-rescan').disabled = true;
+  $('btn-cancel').disabled = false;
+  setStatus('Запуск…');
+  try {
+    // Остальные условия обхода не настраиваются: размер всегда считается как
+    // реально занятое на диске место, файл под несколькими именами — один раз,
+    // а за пределы диска обход не выходит. Разница между способами подсчёта на
+    // живых данных 2–7% и ни на одно решение не влияет.
+    const job = await postJSON('api/scan', {path: path, use_cache: useCache});
+    jobId = job.id;
+    if (job.state === 'running') pollTimer = setInterval(poll, 400);
+    else showFinished(job);
+  } catch (e) {
+    setStatus(esc(e.message), true);
+    finishScan();
+  }
+}
+
+// Пересканирование той папки, что открыта сейчас. Обходить весь том ради одной
+// подпапки — минуты ожидания там, где хватает секунды.
+async function rescanCurrent() {
+  if (!jobId || !currentPath) return startScan(false);
+  clearInterval(pollTimer);
+  $('btn-scan').disabled = $('btn-rescan').disabled = true;
+  $('btn-cancel').disabled = false;
+  viewAfterScan = currentPath;
+  setStatus('Повторное сканирование…');
+  try {
+    const job = await postJSON('api/rescan', {job: jobId, path: currentPath});
+    jobId = job.id;
+    if (job.state === 'running') pollTimer = setInterval(poll, 400);
+    else showFinished(job);
+  } catch (e) {
+    setStatus(esc(e.message), true);
+    finishScan();
+  }
+}
+
+async function cancelScan() {
+  if (jobId) await api('api/scan/' + jobId, {method: 'DELETE'}).catch(() => {});
+}
+
+function finishScan() {
+  clearInterval(pollTimer);
+  $('btn-scan').disabled = $('btn-rescan').disabled = false;
+  $('btn-cancel').disabled = true;
+}
+
+async function poll() {
+  let job;
+  try { job = await api('api/scan/' + jobId); }
+  catch (e) { setStatus(esc(e.message), true); finishScan(); return; }
+
+  if (job.state === 'running') {
+    setStatus(`Сканирование: просмотрено <b>${job.scanned.toLocaleString('ru')}</b> ` +
+              `${plural(job.scanned, 'объект', 'объекта', 'объектов')}, ${job.elapsed} с. ` +
+              `Сканирование можно прервать кнопкой «Отмена» — собранные данные сохранятся.` +
+              `<br><span style="opacity:.7">${esc(job.current_path)}</span>`);
+    return;
+  }
+  showFinished(job);
+}
+
+function showFinished(job) {
+  finishScan();
+  if (job.state === 'error') { setStatus('Ошибка: ' + esc(job.error), true); return; }
+
+  let text = '';
+  if (job.from_cache)
+    text += `<span class="note">Это сохранённый результат прошлого обхода, снят ` +
+            `${esc(whenText(job.snapshot_at))}. С тех пор файлы могли измениться — ` +
+            `нажмите «Пересканировать», чтобы посмотреть заново.</span><br>`;
+  if (job.state === 'cancelled')
+    text += 'Сканирование прервано. Показаны данные, собранные до остановки:<br>';
+  text += `Занято <b>${esc(job.total_size_human)}</b>, файлов внутри: ` +
+          `${job.file_count.toLocaleString('ru')}`;
+  if (!job.from_cache) text += `. Сканирование заняло ${job.elapsed} с`;
+  if (job.hardlink_saved > 0)
+    text += `<br><span style="opacity:.75">Из них ${esc(job.hardlink_saved_human)} не посчитано ` +
+            `дважды: это одни и те же файлы, лежащие под несколькими именами.</span>`;
+  if (job.skipped)
+    text += `<br><span class="err">${job.skipped} ${plural(job.skipped, 'объект не прочитан',
+             'объекта не прочитано', 'объектов не прочитано')} — нет доступа.</span>`;
+  if (job.boundaries && job.boundaries.length)
+    text += `<br><span style="opacity:.75">Эти папки не сканировались: они находятся на другом ` +
+            `диске: ` + job.boundaries.slice(0, 4).map(esc).join(', ') +
+            (job.boundaries.length > 4 ? ` и ещё ${job.boundaries.length - 4}` : '') +
+            '. Каждую можно просканировать отдельно, указав её путь вверху.</span>';
+  setStatus(text);
+  rootPath = job.root_path;
+  const back = viewAfterScan;
+  viewAfterScan = '';
+  loadTree(back || job.root_path);
+  loadVolumes(false).catch(() => {});
+}
+
+// --- дерево и treemap ----------------------------------------------------
+
+async function loadTree(path) {
+  if (!jobId) return;
+  const svg = $('map');
+  const width = Math.max(200, svg.clientWidth), height = Math.max(150, svg.clientHeight);
+  let data;
+  try {
+    data = await api(`api/tree?job=${jobId}&path=${encodeURIComponent(path || '')}` +
+                     `&w=${Math.round(width)}&h=${Math.round(height)}`);
+  } catch (e) { setStatus(esc(e.message), true); return; }
+
+  currentPath = data.node.path;
+  const whole = currentPath === rootPath;
+  $('btn-rescan').textContent = whole ? 'Пересканировать всё' : 'Пересканировать эту папку';
+  $('btn-rescan').title = whole
+    ? 'Обойти весь корень заново, не доверяя сохранённому снимку.'
+    : `Обойти заново только ${data.node.name} — остальное дерево не трогается.`;
+  renderCrumbs(data.breadcrumbs);
+  renderMap(data.tiles, width, height);
+  const crumbs = data.breadcrumbs;
+  const parent = crumbs.length > 1 ? crumbs[crumbs.length - 2] : null;
+  // Кнопка на месте всегда, на верхнем уровне — неактивна. Пропадающий элемент
+  // управления сдвигает список под собой и заставляет каждый раз искать, куда
+  // делась кнопка, которая только что была.
+  const up = `<div class="row" style="padding-bottom:8px">
+       <button ${parent ? `data-go="${esc(parent.path)}"` : 'disabled'}
+         title="${parent ? 'Перейти в папку ' + esc(parent.name)
+                         : 'Это верхний уровень: выше просканированной папки не подняться'}"
+         >↑ Вверх</button>
+       <span class="sub">${parent ? 'в ' + esc(parent.name)
+                                  : 'это верхний уровень'}</span>
+     </div>`;
+
+  // Отмечать и удалять пачкой можно и здесь, не только в поиске: часто нужное
+  // видно прямо в списке папки, и уходить ради этого в поиск незачем.
+  lastChildren = data.rows;
+  if (tab === 'children') selection = new Map();
+
+  // Ушли в другую папку — прежняя подсветка к ней не относится.
+  if (highlighted && !data.rows.some(r => r.path === highlighted)) highlighted = '';
+
+  $('pane-children').innerHTML = data.rows.length
+    ? `<div class="summary">Внутри ${esc(data.node.size_human)} и ` +
+      `${data.node.file_count.toLocaleString('ru')} ` +
+      `${plural(data.node.file_count, 'файл', 'файла', 'файлов')}.</div>` +
+      up + selectionBar(data.rows.length, data.rows.length) +
+      rowsTable(data.rows, false, true)
+    : `<div class="summary">Внутри ничего нет.</div>` + up;
+  refreshSelectionUI();
+  markHighlight(false);
+}
+
+function renderCrumbs(crumbs) {
+  $('crumbs').innerHTML = crumbs.map((c, i) =>
+    (i ? '<span class="sep">/</span>' : '') +
+    (i === crumbs.length - 1
+      ? `<b>${esc(c.name)}</b>`
+      : `<a data-go="${esc(c.path)}">${esc(c.name)}</a>`)).join(' ');
+}
+
+function renderMap(tiles, width, height) {
+  const svg = $('map');
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  if (!tiles.length) {
+    svg.innerHTML = `<text x="${width/2}" y="${height/2}" text-anchor="middle"
+      fill="currentColor" opacity=".5" font-size="14">Нет данных для отображения</text>`;
+    return;
+  }
+  svg.innerHTML = tiles.map(t => {
+    const label = [];
+    const title = t.trash ? 'корзина' : t.name;
+    // Значок в подписи — второй признак вида, помимо заливки и рамки: на
+    // цветной карте разница в прозрачности заметна не всегда, а «папка это или
+    // файл» — первое, что нужно знать, прежде чем нажимать.
+    const glyph = t.grouped ? '' : (t.trash ? '🗑 ' : (t.is_dir ? '📁 ' : '📄 '));
+    // Плитка файла залита вполсилы и потому принимает цвет страницы: в светлой
+    // теме она бледная, в тёмной — тёмная. Белая подпись читалась бы только в
+    // одной из них, поэтому у файлов подпись цвета текста страницы, а белая
+    // остаётся папкам — те залиты плотно.
+    const ink = t.is_dir ? '#fff' : 'currentColor';
+    if (t.w > 62 && t.h > 19) {
+      const maxChars = Math.floor(t.w / 7.4) - (glyph ? 2 : 0);
+      const name = title.length > maxChars ? title.slice(0, Math.max(1, maxChars - 1)) + '…' : title;
+      label.push(`<text x="${t.x + 6}" y="${t.y + 17}" font-size="12.5"
+                   fill="${ink}">${glyph}${esc(name)}</text>`);
+      if (t.h > 38)
+        label.push(`<text x="${t.x + 6}" y="${t.y + 33}" font-size="11.5" fill="${ink}"
+                     opacity=".8">${esc(t.size_human)}</text>`);
+    }
+    // Папка ведёт внутрь, файл — к своей строке в списке справа. Плитка
+    // «остальное» не ведёт никуда: за ней стоит не один объект, а хвост из
+    // сотен мелких.
+    const act = t.drillable ? ` data-go="${esc(t.path)}"`
+              : (t.path ? ` data-locate="${esc(t.path)}"` : '');
+    const kind = t.is_dir ? 'dir' : 'file';
+    // Плитка «остальное» — не папка и не файл, а хвост из сотен мелочей;
+    // называть её файлом было бы враньём.
+    const what = (t.grouped || t.trash) ? '' : ` — ${t.is_dir ? 'папка' : 'файл'}`;
+    const hint = t.drillable ? '\nНажмите, чтобы заглянуть внутрь'
+               : (t.path ? '\nНажмите, чтобы подсветить в списке справа' : '');
+    return `<g><rect x="${t.x}" y="${t.y}" width="${Math.max(0, t.w - 1)}"
+      height="${Math.max(0, t.h - 1)}" fill="${t.color}"
+      fill-opacity="${t.is_dir ? 1 : .45}" data-path="${esc(t.path)}"
+      class="${kind}${t.path === highlighted ? ' hl' : ''}"${act}>
+      <title>${esc(title)}${what}\n${esc(t.size_human)} — это ${
+        t.percent.toFixed(1)}% от открытой папки${
+        t.trash ? '\nУдалённое лежит здесь. Место освободится после очистки корзины.' : ''}${
+        hint}</title>
+      </rect>${label.join('')}</g>`;
+  }).join('');
+}
+
+// --- подсветка одного объекта --------------------------------------------
+//
+// Плитка в карте и строка в списке — один и тот же объект, показанный дважды.
+// Пока связь между ними не видна, найти в списке файл, увиденный на карте,
+// можно только перебором, а списки бывают на сотни строк.
+let highlighted = '';
+
+function locate(path, scroll) {
+  highlighted = path;
+  if (scroll) switchTab('children');
+  markHighlight(scroll);
+}
+
+function markHighlight(scroll) {
+  let row = null;
+  for (const tr of document.querySelectorAll('#pane-children tr[data-row]')) {
+    const on = tr.dataset.row === highlighted;
+    tr.classList.toggle('hl', on);
+    if (on) row = tr;
+  }
+  for (const rect of document.querySelectorAll('#map rect[data-path]'))
+    rect.classList.toggle('hl', !!highlighted && rect.dataset.path === highlighted);
+  if (!scroll) return;
+  if (row) row.scrollIntoView({block: 'center', behavior: 'smooth'});
+  else if (highlighted)
+    setStatus('Этого объекта нет в списке справа: показаны только самые крупные. ' +
+              'Плитка на карте подсвечена.');
+}
+
+// --- таблицы -------------------------------------------------------------
+
+function rowActions(row) {
+  const parts = [];
+  // Корзина удаляется отдельной командой на своей вкладке.
+  if (row.trash) return '';
+  if (config.local)
+    parts.push(`<button class="rowbtn" data-reveal="${esc(row.path)}"
+      title="Открыть это место в проводнике вашей системы">↗</button>`);
+  if (config.allow_delete)
+    parts.push(`<button class="rowbtn" data-del="${esc(row.path)}"
+      data-size="${esc(row.size_human)}"
+      title="Переместить в корзину с возможностью восстановления">🗑</button>`);
+  return parts.join('');
+}
+
+// Отмечать можно, только если сервер умеет удалять пачкой: иначе галочки —
+// обещание, которое не выполнится.
+const canBulkDelete = () => !!(config.allow_delete && config.bulk_delete);
+
+function rowsTable(rows, withParent, selectable) {
+  const pick = selectable && canBulkDelete();
+  // Родительский путь показывается только в поиске; там строки взяты со всего
+  // дерева, и плитки на карте у них нет — подсвечивать нечего.
+  const locatable = !withParent;
+  return `<table>
+    <tr>${pick ? '<th class="chk"></th>' : ''}<th>Имя</th>
+        <th style="text-align:right">Размер</th>
+        <th style="text-align:right">%</th><th></th></tr>` +
+    rows.map(r => `
+      <tr class="${r.drillable ? 'dir' : ''}" data-row="${esc(r.path)}">
+        ${pick ? (r.trash
+            ? '<td class="chk"></td>'
+            : `<td class="chk"><input type="checkbox" data-sel="${esc(r.path)}"
+                 data-size="${r.size}" ${selection.has(r.path) ? 'checked' : ''}
+                 title="Выбрать для удаления"></td>`) : ''}
+        <td class="name" title="${esc(r.path)}" ${r.drillable ? `data-go="${esc(r.path)}"`
+            : (locatable && r.path ? `data-locate="${esc(r.path)}"` : '')}>
+          ${r.trash ? '🗑' : (r.is_dir ? '📁' : '📄')} ${r.trash
+            ? '<span title="Сюда переехало удалённое. Место ещё занято — освободится, когда вы очистите корзину на вкладке «Корзина».">корзина</span>'
+            : esc(r.name)}${r.hardlink
+            ? ' <span class="sub" title="Это второе имя файла, который уже посчитан в другом месте. Удаление такого имени места не освободит.">ещё одно имя того же файла</span>'
+            : ''}
+          ${withParent ? `<div class="sub">${esc(r.parent_path)}</div>` : ''}
+          <div class="bar" style="width:${Math.max(1, Math.min(100, r.percent))}%"></div>
+        </td>
+        <td class="num">${esc(r.size_human)}</td>
+        <td class="pct">${r.percent.toFixed(1)}</td>
+        <td class="act">${rowActions(r)}</td>
+      </tr>`).join('') + '</table>';
+}
+
+// --- поиск ---------------------------------------------------------------
+
+function searchParams() {
+  // Отмечать можно только показанное, поэтому берём с запасом.
+  const params = new URLSearchParams({job: jobId, limit: '5000'});
+  const term = $('q').value.trim();
+  if (term) params.set('q', term);
+  params.set('mode', $('f-mode').value);
+  params.set('kind', $('f-kind').value);
+  const cat = $('f-cat').value;
+  if (cat) params.append('category', cat);
+  const min = parseFloat($('f-min').value);
+  if (min > 0) params.set('min_size', Math.round(min * MB));
+  if ($('f-top').checked) params.set('top_only', 'true');
+  if ($('f-group').checked) params.set('group', 'true');
+  if ($('f-scope').checked && currentPath) params.set('path', currentPath);
+  return params;
+}
+
+async function runSearch() {
+  if (!jobId) {
+    setStatus('Искать пока не в чем: сначала выберите папку и нажмите «Сканировать».', true);
+    return;
+  }
+  const box = $('search-result');
+  box.innerHTML = '<div class="empty">Поиск…</div>';
+  let data;
+  try { data = await api('api/search?' + searchParams().toString()); }
+  catch (e) { box.innerHTML = `<div class="empty err">${esc(e.message)}</div>`; return; }
+
+  lastSearch = data;
+  const nothing = '<div class="empty">Ничего не найдено.' +
+    '<small>Попробуйте ослабить условия: убрать ограничение по размеру или виду ' +
+    'файлов, либо переключить поиск с «имя целиком» на «часть имени».</small></div>';
+  const found = `Найдено ${data.total_found.toLocaleString('ru')} ` +
+    `${plural(data.total_found, 'объект', 'объекта', 'объектов')}, вместе они занимают ` +
+    `<b>${esc(data.total_size_human)}</b>` +
+    (data.scope !== rootPath ? `. Искали внутри ${esc(data.scope)}` : '');
+  selection = new Map();
+  const shownCount = data.groups
+    ? data.groups.reduce((n, g) => n + (g.items || []).length, 0)
+    : data.rows.length;
+  const bar = selectionBar(data.total_found, shownCount, data.all_capped);
+
+  if (data.groups) {
+    groupItems = new Map(data.groups.map((g, i) => [String(i), g]));
+    box.innerHTML = `<div class="summary">${found}. Одинаковые имена сведены в одну строку:
+      «Сколько» — это число найденных объектов с таким именем, «Всего занимают» — их
+      суммарный размер. Щёлкните по строке, чтобы развернуть список и разобраться
+      с каждым по отдельности.</div>` + (data.groups.length
+      ? bar + `<table>
+         <tr>${canBulkDelete() ? '<th class="chk"></th>' : ''}<th>Имя</th>
+             <th style="text-align:right">Количество</th>
+             <th style="text-align:right">Общий размер</th></tr>` +
+        data.groups.map((g, i) => `
+          <tr class="group" data-group="${i}">
+            ${canBulkDelete() ? `<td class="chk"><input type="checkbox"
+                data-selgroup="${i}" title="Выбрать все объекты этой группы"></td>` : ''}
+            <td class="name"><span class="caret">▸</span>${esc(g.name)}
+              <div class="bar" style="width:${Math.max(1, Math.min(100, g.percent))}%"></div></td>
+            <td class="pct">${g.count}</td>
+            <td class="num">${esc(g.total_size_human)}</td></tr>
+          <tr class="items hidden" data-items="${i}">
+            <td colspan="${canBulkDelete() ? 4 : 3}"></td></tr>`).join('')
+        + '</table>'
+      : nothing);
+  } else {
+    box.innerHTML = `<div class="summary">${found}. Под каждым именем — папка,
+      в которой объект лежит; проценты считаются от всего просканированного.</div>` +
+      (data.rows.length ? bar + rowsTable(data.rows, true, true) : nothing);
+  }
+  refreshSelectionUI();
+}
+
+// Разворачивание группы: содержимое рисуется по требованию, потому что групп
+// бывает много, а объектов в каждой — сотни.
+function toggleGroup(index) {
+  const head = document.querySelector(`tr.group[data-group="${index}"]`);
+  const holder = document.querySelector(`tr.items[data-items="${index}"]`);
+  const group = groupItems.get(String(index));
+  if (!head || !holder || !group) return;
+
+  const items = group.items || [];
+  const opening = holder.classList.contains('hidden');
+  if (opening && !holder.dataset.filled) {
+    const shown = items.length;
+    holder.firstElementChild.innerHTML = `<div class="items-box">` +
+      (shown ? rowsTable(items, true, true)
+             : '<div class="empty">Список объектов не получен. Обновите страницу.</div>') +
+      (shown < group.count
+        ? `<div class="sub" style="padding-top:6px">Показаны ${shown} самых крупных
+           из ${group.count}.</div>`
+        : '') + '</div>';
+    holder.dataset.filled = '1';
+  }
+  holder.classList.toggle('hidden', !opening);
+  head.classList.toggle('open', opening);
+  refreshSelectionUI();
+}
+
+// --- отметки и групповое удаление -----------------------------------------
+
+// path -> размер в байтах. Держим размеры рядом, чтобы показывать, сколько
+// освободится, не переспрашивая сервер.
+let selection = new Map();
+
+function humanSize(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let size = bytes, unit = 0;
+  while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
+  return (unit === 0 ? size : size.toFixed(1)) + ' ' + units[unit];
+}
+
+function selectionBar(total, shown, capped) {
+  if (!config.allow_delete) return '';
+  if (!config.bulk_delete)
+    return `<div class="summary"><span class="err">Сервер работает из старой версии:
+      он не знает про удаление пачкой, поэтому галочки не показаны. Остановите его
+      и запустите заново — страница сама подхватится.</span></div>`;
+  // Строк в таблице меньше, чем находок, — но отмечаются все находки, и это
+  // нужно сказать прямо: иначе «выбрать все» поверх двухсот видимых строк
+  // выглядит как выбор этих двухсот.
+  const marked = allFoundRows().length;
+  const cut = total > shown
+    ? `<span class="note">В таблице — ${shown.toLocaleString('ru')} самых крупных
+       из ${total.toLocaleString('ru')}, чтобы её можно было читать.
+       «Выбрать все» отметит и удалит все ${marked.toLocaleString('ru')}${
+         capped ? ' — больше за один раз не получится, остальные подтянутся после '
+                + 'повторного поиска' : ''}.</span>`
+    : '';
+  return `<div class="row selbar idle">
+      <label class="opt"><input type="checkbox" class="sel-all"> выбрать все</label>
+      <span class="sub sel-info">ничего не выбрано</span>
+      <button class="destructive btn-del-selected">Удалить отмеченные</button>
+      <span class="err sel-error"></span>
+    </div>${cut ? `<div class="summary">${cut}</div>` : ''}`;
+}
+
+// Всё, что можно отметить в открытой вкладке.
+//
+// В поиске это весь набор находок, а не показанные строки: сервер отдаёт его
+// отдельным списком из путей и размеров. Раньше здесь были видимые строки, и
+// «выбрать все» на двенадцати тысячах __pycache__ отмечало двести — те двести
+// и удалялись, остальное оставалось на месте. Обещание, которого интерфейс не
+// выполнял.
+//
+// В «Содержимом» отмечать можно то, что лежит в текущей папке.
+function allFoundRows() {
+  if (tab === 'children') return lastChildren;
+  if (!lastSearch) return [];
+  return lastSearch.all || [];
+}
+
+// Имя объекта по пути: в наборе для отметки лежат только путь и размер, а
+// группа задаётся именно точным именем.
+function baseName(path) {
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return cut < 0 ? path : path.slice(cut + 1);
+}
+
+// Объекты одной группы — все, а не только показанные в развёрнутом списке.
+function groupMembers(index) {
+  const group = groupItems.get(String(index));
+  if (!group) return [];
+  return allFoundRows().filter(item => baseName(item.path) === group.name);
+}
+
+function setSelected(path, size, on) {
+  if (on) selection.set(path, size); else selection.delete(path);
+}
+
+function toggleAll(on) {
+  for (const row of allFoundRows()) setSelected(row.path, row.size, on);
+}
+
+function toggleGroupSelection(index, on) {
+  for (const item of groupMembers(index)) setSelected(item.path, item.size, on);
+}
+
+function refreshSelectionUI() {
+  let bytes = 0;
+  for (const size of selection.values()) bytes += size;
+  const rows = allFoundRows();
+  const all = rows.length > 0 && rows.every(r => selection.has(r.path));
+  const some = selection.size > 0;
+  const info = selection.size === 0
+    ? 'ничего не выбрано'
+    : `выбрано ${selection.size.toLocaleString('ru')} ` +
+      `${plural(selection.size, 'объект', 'объекта', 'объектов')} на ${humanSize(bytes)}`;
+
+  for (const bar of document.querySelectorAll('.selbar')) {
+    bar.classList.toggle('idle', selection.size === 0);
+    bar.querySelector('.sel-info').textContent = info;
+    const box = bar.querySelector('.sel-all');
+    box.checked = all;
+    box.indeterminate = some && !all;
+  }
+
+  for (const box of document.querySelectorAll('[data-sel]'))
+    box.checked = selection.has(box.dataset.sel);
+  for (const box of document.querySelectorAll('[data-selgroup]')) {
+    const items = groupMembers(box.dataset.selgroup);
+    const marked = items.filter(i => selection.has(i.path)).length;
+    box.checked = marked > 0 && marked === items.length;
+    box.indeterminate = marked > 0 && marked < items.length;
+  }
+}
+
+function askDeleteSelected() {
+  if (!selection.size || busy()) return;
+  let bytes = 0;
+  for (const size of selection.values()) bytes += size;
+  const paths = [...selection.keys()];
+  const preview = paths.slice(0, 3).join('\n') +
+    (paths.length > 3 ? `\n…и ещё ${(paths.length - 3).toLocaleString('ru')}` : '');
+  ask({
+    title: `Переместить в корзину ${selection.size.toLocaleString('ru')} ` +
+           `${plural(selection.size, 'объект', 'объекта', 'объектов')}?`,
+    path: preview,
+    note: `Занимают ${humanSize(bytes)}. Объекты будут перемещены в .freespace-trash; ` +
+          'восстановить их можно на вкладке «Корзина». Место освободится, только ' +
+          'когда вы очистите корзину.',
+    action: 'Переместить',
+  }, doDeleteSelected);
+}
+
+async function doDeleteSelected() {
+  const paths = [...selection.keys()];
+  setStatus(`Перемещение в корзину: ${paths.length.toLocaleString('ru')} ` +
+            `${plural(paths.length, 'объект', 'объекта', 'объектов')}…`);
+  let res;
+  try {
+    res = await withProgress('Перемещение в корзину',
+      op => postJSON('api/delete-many', {job: jobId, paths: paths, op: op}));
+  } catch (e) {
+    let text = 'Не удалось удалить: ' + esc(e.message);
+    if (/not found/i.test(e.message))
+      text += '<br>Похоже, сервер работает из старой версии — он не знает про ' +
+              'пакетное удаление. Остановите его и запустите заново.';
+    setStatus(text, true);
+    // Дублируем рядом с кнопкой: пользователь смотрит сюда, а строка
+    // состояния — в другом конце окна, и её легко не заметить.
+    for (const slot of document.querySelectorAll('.sel-error')) slot.innerHTML = text;
+    return;
+  }
+
+  let text = `Перемещено в корзину: ${res.deleted.toLocaleString('ru')} ` +
+             `${plural(res.deleted, 'объект', 'объекта', 'объектов')}, ` +
+             `освободится ${esc(res.freed_human)} после очистки корзины.`;
+  const extra = [];
+  if (res.inside_deleted)
+    extra.push(`${res.inside_deleted} перемещено вместе с выбранными папками`);
+  if (res.already_gone)
+    extra.push(`${res.already_gone} уже отсутствовало на диске`);
+  if (extra.length) text += ' ' + extra.join(', ') + '.';
+  // По причинам, а не по объектам: сто одинаковых абзацев никто не прочитает.
+  for (const group of res.failures || [])
+    text += `<br><span class="err">Не удалось: ${group.count.toLocaleString('ru')} ` +
+            `${plural(group.count, 'объект', 'объекта', 'объектов')} — ` +
+            `${esc(group.reason)}</span>` +
+            `<br><span class="sub">например: ${group.examples.map(esc).join(', ')}</span>`;
+  setStatus(text);
+
+  selection = new Map();
+  loadVolumes(false).catch(() => {});
+  await loadTree(currentPath);
+  if (tab === 'search') runSearch();
+  if (tab === 'trash') loadTrash();
+}
+
+// Готовые условия. Всё, что здесь есть, безопасно искать и удалять пачкой:
+// либо содержимое пересоздаётся инструментом само, либо восстанавливается из
+// requirements.txt и package.json. Логи экспериментов (mlruns, wandb,
+// lightning_logs) и кэши моделей сюда намеренно не попали: первые — результаты
+// работы, вторые качаются часами.
+const PRESETS = {
+  big: {q: '', mode: 'substring', kind: 'files', min: 100},
+  video: {q: '', mode: 'substring', kind: 'files', cat: 'video'},
+  archive: {q: '', mode: 'substring', kind: 'files', cat: 'archive'},
+
+  // Скомпилированный байткод: появится заново при первом же запуске.
+  pycache: {q: '__pycache__', mode: 'exact', kind: 'dirs', group: true},
+  // Автосохранения Jupyter рядом с каждой тетрадкой.
+  notebooks: {q: '.ipynb_checkpoints', mode: 'exact', kind: 'dirs', group: true},
+
+  // venv, .venv, myvenv — восстанавливаются из requirements.txt. Без
+  // группировки: имена различаются, и сводка распалась бы на строку про venv и
+  // строку про .venv, тогда как нужен один список, который можно отметить.
+  venv: {q: '*venv', mode: 'glob', kind: 'dirs'},
+};
+
+function applyPreset(name) {
+  const p = PRESETS[name];
+  if (!p) return;
+  $('q').value = p.q || '';
+  $('f-mode').value = p.mode || 'substring';
+  $('f-kind').value = p.kind || 'all';
+  $('f-cat').value = p.cat || '';
+  $('f-min').value = p.min || '';
+  $('f-group').checked = !!p.group;
+  $('f-top').checked = !!p.top;
+  runSearch();
+}
+
+// --- ход долгих операций --------------------------------------------------
+//
+// Перенос в корзину и её очистка идут секундами и десятками секунд: перед
+// переносом считается размер поддерева, а очистка стирает файлы по-настоящему.
+// Пока это происходило молча, всё выглядело так, будто нажатие не сработало, —
+// и следующим движением человек нажимал ещё раз.
+//
+// Запрос при этом остаётся обычным: браузер придумывает токен, кладёт его в
+// тело запроса и, пока тот висит, опрашивает /api/progress/<токен>.
+
+let opTimer = null;
+
+function opToken() {
+  return (crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '')
+                            : Math.random().toString(36).slice(2) + Date.now().toString(36));
+}
+
+// Занята ли страница долгой операцией. Второе удаление поверх первого дало бы
+// две полосы на один индикатор и перерисовку дерева посреди чужой работы.
+function busy() {
+  if (!opTimer) return false;
+  setStatus('Дождитесь завершения текущей операции — её ход показан вверху страницы.', true);
+  return true;
+}
+
+// Хвост пути важнее начала: имя объекта — это то, что человек ищет глазами.
+function pathLabel(path) {
+  if (!path) return '';
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return cut < 0 ? `<b>${esc(path)}</b>`
+    : `<b>${esc(path.slice(cut + 1))}</b> <span style="opacity:.6">${esc(path.slice(0, cut))}</span>`;
+}
+
+function renderProgress(op) {
+  if (!op || op.state === 'unknown') return;
+  const track = $('pg-track');
+  // Байты знаем заранее только при очистке корзины — там размеры уже записаны.
+  // В остальных случаях считаем по объектам, а на одном большом объекте не
+  // остаётся ничего, кроме числа пройденных файлов.
+  const byBytes = op.total_bytes > 0;
+  const total = byBytes ? op.total_bytes : op.total;
+  const done = byBytes ? op.freed : op.done;
+  // Один объект — делить нечего: полоса простояла бы на нуле всё время работы
+  // и выглядела бы ровно так же, как замерший интерфейс, от которого мы и
+  // уходим. Там, где долю посчитать нельзя, полоса просто бежит.
+  if (total > 0 && (byBytes || op.total > 1)) {
+    track.classList.remove('wait');
+    $('pg-fill').style.width = Math.min(100, done / total * 100) + '%';
+  } else {
+    track.classList.add('wait');
+  }
+  const parts = [];
+  // «0 из 1» — не сведения, а видимость счёта: на одном объекте единственное
+  // содержательное число — сколько файлов внутри уже просмотрено.
+  if (op.total > 1)
+    parts.push(`${op.done.toLocaleString('ru')} / ${op.total.toLocaleString('ru')}`);
+  if (op.freed > 0) parts.push(humanSize(op.freed));
+  if (op.counted > 0) parts.push(`${op.counted.toLocaleString('ru')} файлов`);
+  $('pg-count').textContent = parts.join(' · ');
+  if (op.current) $('pg-path').innerHTML = pathLabel(op.current);
+}
+
+async function withProgress(title, run) {
+  const token = opToken();
+  $('pg-title').textContent = title;
+  $('pg-count').textContent = '';
+  $('pg-path').textContent = 'Подготовка…';
+  $('pg-track').classList.add('wait');
+  $('pg-fill').style.width = '0';
+  $('progress').classList.remove('off');
+  // Опрос почти всегда обгоняет сам запрос: первые ответы приходят про ещё не
+  // начатую операцию, и это нормально — renderProgress их пропускает.
+  opTimer = setInterval(() => {
+    api('api/progress/' + token).then(renderProgress).catch(() => {});
+  }, 250);
+  try {
+    return await run(token);
+  } finally {
+    clearInterval(opTimer);
+    opTimer = null;
+    $('progress').classList.add('off');
+  }
+}
+
+// --- удаление и корзина --------------------------------------------------
+
+// Свой диалог вместо window.confirm: тот выглядит чужеродно и не показывает
+// ни полного пути, ни размера — а именно они и нужны, чтобы не удалить не то.
+let onConfirmed = null;
+
+function ask({title, path, note, action}, callback) {
+  $('confirm-title').textContent = title;
+  $('confirm-path').textContent = path;
+  $('confirm-note').textContent = note;
+  $('confirm-yes').textContent = action;
+  onConfirmed = callback;
+  $('confirm').showModal();
+}
+
+function askDelete(path, sizeHuman) {
+  if (busy()) return;
+  ask({
+    title: 'Переместить в корзину?',
+    path: path,
+    note: `Занимает ${sizeHuman}. Объект не удаляется безвозвратно, а перемещается в папку ` +
+          '.freespace-trash — восстановить его можно в любой момент на вкладке «Корзина». ' +
+          'Место на диске освободится, только когда вы очистите корзину.',
+    action: 'Переместить',
+  }, () => doDelete(path));
+}
+
+async function doDelete(path) {
+  if (!path) return;
+  try {
+    const entry = await withProgress('Перемещение в корзину',
+      op => postJSON('api/delete', {job: jobId, path: path, op: op}));
+    loadVolumes(false).catch(() => {});
+    setStatus(`<b>${esc(entry.name)}</b> (${esc(entry.size_human)}) перемещено в корзину. ` +
+              `Место освободится окончательно после очистки корзины — до тех пор ` +
+              `объект можно восстановить на вкладке «Корзина».`);
+    await loadTree(currentPath);
+    if (tab === 'trash') loadTrash();
+    if (tab === 'search') runSearch();
+  } catch (e) {
+    setStatus('Не удалось удалить: ' + esc(e.message), true);
+  }
+}
+
+async function loadTrash() {
+  const pane = $('pane-trash');
+  if (!jobId) {
+    pane.innerHTML = '<div class="empty">Сначала выберите папку и нажмите «Сканировать» — ' +
+                     'у каждой просканированной папки своя корзина.</div>';
+    return;
+  }
+  let data;
+  try { data = await api('api/trash?job=' + jobId); }
+  catch (e) { pane.innerHTML = `<div class="empty err">${esc(e.message)}</div>`; return; }
+
+  if (!data.available) {
+    pane.innerHTML = '<div class="empty">Здесь негде создать корзину: в эту папку ' +
+                     'нельзя писать, поэтому удаление отсюда недоступно.</div>';
+    return;
+  }
+  if (!data.entries.length) {
+    pane.innerHTML = `<div class="summary">Папка корзины: ${esc(data.dirs[0] || '')}</div>
+      <div class="empty">Корзина пуста.
+        <small>Удалённые объекты сначала попадают сюда и продолжают занимать
+        место, пока корзина не очищена.</small></div>`;
+    return;
+  }
+  pane.innerHTML = `
+    <div class="summary">В корзине лежит <b>${esc(data.total_size_human)}</b> —
+      это место ещё занято. Чтобы освободить его, очистите корзину;
+      чтобы отменить удаление — восстановите объект.
+      <br>${data.dirs.length > 1 ? 'Папки корзины: ' : 'Папка корзины: '}${
+        data.dirs.map(esc).join(', ')}
+    </div>
+    <div class="row"><button class="danger" id="btn-empty"
+      data-empty="${esc(data.dirs.join(', '))}" data-size="${esc(data.total_size_human)}">Очистить корзину</button></div>
+    <table style="margin-top:8px"><tr><th>Имя</th><th style="text-align:right">Размер</th><th></th></tr>` +
+    data.entries.map(e => `
+      <tr><td class="name" title="${esc(e.original_path)}">
+            ${e.is_dir ? '📁' : '📄'} ${esc(e.name)}
+            <div class="sub">Удалено ${esc(whenText(e.deleted_at))},
+              лежало здесь: ${esc(e.original_path)}</div></td>
+          <td class="num">${esc(e.size_human)}</td>
+          <td class="act"><button class="small" data-restore="${esc(e.id)}"
+            title="Восстановить объект в исходное расположение">Восстановить</button></td>
+      </tr>`).join('') + '</table>';
+}
+
+async function restoreEntry(entryId) {
+  try {
+    const res = await postJSON('api/trash/restore', {job: jobId, entry: entryId});
+    loadVolumes(false).catch(() => {});
+    setStatus(`Восстановлен объект: <b>${esc(res.restored)}</b>. На карте его пока нет — ` +
+              `нажмите «Пересканировать», чтобы она сошлась с диском.`);
+    loadTrash();
+  } catch (e) { setStatus('Не удалось восстановить объект: ' + esc(e.message), true); }
+}
+
+function askEmptyTrash(dirPath, sizeHuman) {
+  if (busy()) return;
+  ask({
+    title: 'Очистить корзину?',
+    path: dirPath,
+    note: `Освободится ${sizeHuman}. Действие необратимо: восстановить ` +
+          'удалённые объекты будет невозможно.',
+    action: 'Очистить корзину',
+  }, emptyTrash);
+}
+
+async function emptyTrash() {
+  try {
+    const res = await withProgress('Очистка корзины',
+      op => postJSON('api/trash/empty', {job: jobId, entry: '', op: op}));
+    loadVolumes(false).catch(() => {});
+    setStatus(`Корзина очищена. Удалено объектов: ${res.removed} ` +
+              `${plural(res.removed, 'объект', 'объекта', 'объектов')}, ` +
+              `освободилось ${esc(res.freed_human)}.`);
+    loadTrash();
+  } catch (e) { setStatus('Не удалось очистить корзину: ' + esc(e.message), true); }
+}
+
+// --- вкладки и события ---------------------------------------------------
+
+function switchTab(name) {
+  if (name !== tab) selection = new Map();
+  tab = name;
+  for (const btn of document.querySelectorAll('.tabs button'))
+    btn.classList.toggle('on', btn.dataset.tab === name);
+  for (const key of ['children', 'search', 'trash'])
+    $('pane-' + key).classList.toggle('hidden', key !== name);
+  if (name === 'trash') loadTrash();
+  refreshSelectionUI();
+}
+
+// Одно делегирование на весь документ: пути попадают в data-атрибуты, а не в
+// строку обработчика, поэтому кавычки и апострофы в именах ничего не ломают.
+document.addEventListener('click', event => {
+  const el = event.target.closest('[data-go],[data-pick],[data-del],[data-reveal],' +
+                                  '[data-restore],[data-preset],[data-tab],[data-empty],' +
+                                  '[data-group],[data-locate]');
+  if (!el) return;
+  if (event.target.matches('input[type=checkbox]')) return;
+  if (el.dataset.go !== undefined) { loadTree(el.dataset.go); switchTab('children'); }
+  else if (el.dataset.locate !== undefined) locate(el.dataset.locate, true);
+  else if (el.dataset.pick !== undefined) $('path').value = el.dataset.pick;
+  else if (el.dataset.del !== undefined) askDelete(el.dataset.del, el.dataset.size || '');
+  else if (el.dataset.reveal !== undefined)
+    postJSON('api/reveal', {job: jobId, path: el.dataset.reveal})
+      .catch(e => setStatus(esc(e.message), true));
+  else if (el.dataset.restore !== undefined) restoreEntry(el.dataset.restore);
+  else if (el.dataset.preset !== undefined) applyPreset(el.dataset.preset);
+  else if (el.dataset.tab !== undefined) switchTab(el.dataset.tab);
+  else if (el.dataset.empty !== undefined)
+    askEmptyTrash(el.dataset.empty, el.dataset.size || '');
+  else if (el.dataset.group !== undefined) toggleGroup(el.dataset.group);
+});
+
+// Галочки слушаем отдельно от кликов: change не срабатывает от клика по
+// строке вокруг и не путается с разворачиванием группы.
+document.addEventListener('change', event => {
+  const el = event.target;
+  if (el.classList.contains('sel-all')) toggleAll(el.checked);
+  else if (el.dataset.sel !== undefined)
+    setSelected(el.dataset.sel, Number(el.dataset.size) || 0, el.checked);
+  else if (el.dataset.selgroup !== undefined)
+    toggleGroupSelection(el.dataset.selgroup, el.checked);
+  else return;
+  refreshSelectionUI();
+});
+
+document.addEventListener('click', event => {
+  if (event.target.classList.contains('btn-del-selected')) askDeleteSelected();
+});
+
+$('btn-scan').onclick = () => startScan(true);
+$('btn-rescan').onclick = rescanCurrent;
+$('btn-cancel').onclick = cancelScan;
+$('btn-search').onclick = runSearch;
+$('confirm-yes').onclick = () => {
+  const callback = onConfirmed;
+  onConfirmed = null;
+  $('confirm').close();
+  if (callback) callback();
+};
+$('confirm-no').onclick = () => { onConfirmed = null; $('confirm').close(); };
+$('path').addEventListener('keydown', e => { if (e.key === 'Enter') startScan(true); });
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
+
+// Раскладка считается на сервере, поэтому при изменении размера перезапрашиваем.
+window.addEventListener('resize', () => {
+  if (!jobId || !currentPath) return;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => loadTree(currentPath), 200);
+});
+</script>
+</body>
+</html>
