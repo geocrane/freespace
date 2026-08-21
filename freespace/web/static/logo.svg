@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 48 48" fill="none" role="img" aria-label="FreeSpace">
+  <title>FreeSpace</title>
+  <circle cx="24" cy="24" r="17" stroke="#4F86C6" stroke-opacity=".25" stroke-width="9"/>
+  <circle cx="24" cy="24" r="17" stroke="#4F86C6" stroke-width="9" stroke-linecap="round"
+          stroke-dasharray="66 107" transform="rotate(-90 24 24)"/>
+  <circle cx="24" cy="24" r="3.2" fill="#4F86C6"/>
+</svg>
