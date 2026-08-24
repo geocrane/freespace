@@ -30,6 +30,7 @@ htmlcov/
 # Рантайм-файлы запуска (создаёт start.ipynb) и корзина
 .freespace-server.json
 .freespace-server.log
+.freespace-pip.log
 .freespace-trash/
 
 # Служебные файлы ОС

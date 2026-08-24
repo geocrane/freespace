@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import socket
 import stat
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -81,33 +84,202 @@ def test_launcher_knows_the_container_domain():
     assert "proxy/" in source, "адрес за jupyter-server-proxy должен собираться"
 
 
-def test_launcher_installs_through_the_portal_index(monkeypatch, capsys):
+# Типичная простыня pip: разведка метаданных, скачивание колёс, установка.
+PIP_OUTPUT = """Collecting fastapi>=0.110
+  Using cached fastapi-0.141.1-py3-none-any.whl.metadata (27 kB)
+Collecting starlette>=0.46.0 (from fastapi>=0.110)
+  Using cached starlette-1.6.0-py3-none-any.whl.metadata (6.4 kB)
+Requirement already satisfied: typing_extensions>=4.8.0 in /usr/lib (4.16.0)
+Using cached fastapi-0.141.1-py3-none-any.whl (131 kB)
+Using cached starlette-1.6.0-py3-none-any.whl (75 kB)
+Installing collected packages: starlette, fastapi
+Successfully installed fastapi-0.141.1 starlette-1.6.0
+"""
+
+
+class FakePip:
+    """Подделка процесса pip: отдаёт заготовленный вывод и код возврата."""
+
+    def __init__(self, output: str = PIP_OUTPUT, code: int = 0):
+        self.stdout = io.StringIO(output)
+        self._code = code
+
+    def wait(self, timeout=None) -> int:
+        return self._code
+
+    def poll(self) -> int:
+        return self._code
+
+
+class SilentProgress:
+    """Прогресс-бар без рисования: в тесте важны цифры, а не строка."""
+
+    def __init__(self) -> None:
+        self.done = self.total = 0
+        self.notes: list[str] = []
+
+    def update(self, *, done=None, total=None, note=None) -> None:
+        if done is not None:
+            self.done = done
+        if total is not None:
+            self.total = max(total, self.done)
+        if note is not None:
+            self.notes.append(note)
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def pip_log(monkeypatch, tmp_path):
+    """Каталог, куда уйдёт лог pip: в рабочем дереве ему при тестах не место."""
+    monkeypatch.setattr(notebook, "find_project_root", lambda *a, **kw: tmp_path)
+    return tmp_path / notebook.PIP_LOG_NAME
+
+
+def test_launcher_installs_through_the_portal_index(monkeypatch, capsys, pip_log):
     """С PyPI из контейнера связи нет: только индекс портала и только по токену."""
-    seen: list[list[str]] = []
+    seen: list[dict] = []
 
-    class Result:
-        returncode = 0
+    def fake_popen(command, **kw):
+        seen.append({"command": command, "env": kw.get("env", {})})
+        return FakePip()
 
-    monkeypatch.setattr(notebook.subprocess, "run",
-                        lambda command, *a, **kw: seen.append(command) or Result())
-    notebook.install(["fastapi>=0.110"], "s3cret")
+    monkeypatch.setattr(notebook.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(notebook, "missing_modules", lambda modules: [])
+    notebook.install(["fastapi>=0.110"], "s3cret", modules=["fastapi"])
 
-    command = " ".join(seen[0])
-    assert f"--index-url=https://token:s3cret@{notebook.INDEX_HOST}" in command
-    assert f"--trusted-host={notebook.INDEX_HOST}" in command
-    # Токен не должен попасть в вывод ячейки: тот сохраняется прямо в .ipynb.
+    env = seen[0]["env"]
+    assert env["PIP_INDEX_URL"] == (
+        f"https://token:s3cret@{notebook.INDEX_HOST}{notebook.INDEX_PATH}")
+    assert env["PIP_TRUSTED_HOST"] == notebook.INDEX_HOST
+    # Токен в argv видно через `ps` любому соседу по контейнеру.
+    assert "s3cret" not in " ".join(seen[0]["command"])
+    # И не должен попасть в вывод ячейки: тот сохраняется прямо в .ipynb.
     printed = capsys.readouterr().out
     assert "s3cret" not in printed
-    assert "***" in printed
+    assert "***" in printed and "PIP_INDEX_URL" in printed
 
 
-def test_launcher_install_reports_failure(monkeypatch):
-    class Result:
-        returncode = 1
+def test_launcher_pip_env_survives_a_capricious_index():
+    """Индекс портала обрывает соединения — pip должен повторять, а не сдаваться."""
+    env = notebook._pip_env("s3cret")
+    assert int(env["PIP_RETRIES"]) >= 3
+    assert int(env["PIP_TIMEOUT"]) > 0
+    assert env["PYTHONUNBUFFERED"] == "1"
 
-    monkeypatch.setattr(notebook.subprocess, "run", lambda *a, **kw: Result())
-    with pytest.raises(RuntimeError, match="зависимости портала"):
-        notebook.install(["fastapi"], "s3cret")
+
+def test_launcher_install_shows_progress_instead_of_pip_output(monkeypatch, capsys, pip_log):
+    """Полсотни строк «Collecting …» в ячейке — не отчёт, а мусор."""
+    monkeypatch.setattr(notebook.subprocess, "Popen", lambda command, **kw: FakePip())
+    monkeypatch.setattr(notebook, "missing_modules", lambda modules: [])
+    notebook.install(["fastapi>=0.110"], "")
+
+    shown = capsys.readouterr()
+    everything = shown.out + shown.err     # tqdm пишет в stderr, запасной бар — в stdout
+    assert "Collecting" not in everything
+    assert "Using cached" not in everything
+
+
+def test_launcher_progress_counts_packages_not_metadata():
+    """Знаменатель — найденные пакеты, числитель — приехавшие; .metadata не в счёт."""
+    progress = SilentProgress()
+    log = notebook._follow_pip(io.StringIO(PIP_OUTPUT), progress)
+
+    assert (progress.done, progress.total) == (3, 3)
+    assert len(log) == PIP_OUTPUT.count("\n"), "лог нужен целиком — по нему разбирают ошибки"
+
+
+def test_launcher_progress_survives_without_tqdm(monkeypatch, capsys, pip_log):
+    """В голом контейнере tqdm может не быть — бар всё равно должен рисоваться."""
+    monkeypatch.setitem(sys.modules, "tqdm.auto", None)
+    monkeypatch.setattr(notebook.subprocess, "Popen", lambda command, **kw: FakePip())
+    monkeypatch.setattr(notebook, "missing_modules", lambda modules: [])
+    notebook.install(["fastapi>=0.110"], "")
+
+    assert "2/3" in capsys.readouterr().out
+
+
+def test_launcher_install_writes_the_full_output_to_a_log(monkeypatch, pip_log):
+    """Прогресс-бар показывает одну строку — остальное должно найтись в логе."""
+    monkeypatch.setattr(notebook.subprocess, "Popen", lambda command, **kw: FakePip())
+    monkeypatch.setattr(notebook, "missing_modules", lambda modules: [])
+    notebook.install(["fastapi>=0.110"], "s3cret")
+
+    written = pip_log.read_text(encoding="utf-8")
+    assert "Collecting fastapi>=0.110" in written
+    assert "s3cret" not in written, "в логе остаётся заголовок команды — токен в нём не нужен"
+
+
+def test_launcher_install_trusts_imports_over_the_exit_code(monkeypatch, capsys, pip_log):
+    """pip умеет вернуть ноль, положив пакет туда, где сервер его не увидит."""
+    monkeypatch.setattr(notebook.subprocess, "Popen", lambda command, **kw: FakePip())
+    monkeypatch.setattr(notebook, "missing_modules", lambda modules: ["fastapi"])
+    with pytest.raises(RuntimeError, match="не импортируются: fastapi"):
+        notebook.install(["fastapi>=0.110"], "s3cret", modules=["fastapi"])
+
+    # И наоборот: ошибка pip из-за постороннего конфликта — не повод вставать,
+    # если нужные модули на месте.
+    monkeypatch.setattr(notebook.subprocess, "Popen",
+                        lambda command, **kw: FakePip(code=1))
+    monkeypatch.setattr(notebook, "missing_modules", lambda modules: [])
+    notebook.install(["fastapi>=0.110"], "s3cret", modules=["fastapi"])
+    assert "продолжаю" in capsys.readouterr().out
+
+
+def test_launcher_install_reports_failure(monkeypatch, capsys, pip_log):
+    failure = "Collecting nosuchpkg\nERROR: No matching distribution found\n"
+    monkeypatch.setattr(notebook.subprocess, "Popen",
+                        lambda command, **kw: FakePip(failure, code=1))
+    monkeypatch.setattr(notebook, "missing_modules", lambda modules: ["fastapi"])
+    with pytest.raises(RuntimeError, match="зависимости портала") as failed:
+        notebook.install(["fastapi"], "s3cret", modules=["fastapi"])
+
+    # Прогресс-бар прячет вывод pip — при ошибке он должен вернуться.
+    assert "ERROR: No matching distribution found" in capsys.readouterr().out
+    assert "нужной версии" in str(failed.value), "у частых причин должна быть подсказка"
+
+
+def test_launcher_hints_at_a_stale_token():
+    log = ["ERROR: 401 Client Error: Unauthorized for url: https://sberosc..."]
+    assert "токен" in notebook._hint(log).lower()
+    assert notebook._hint(["Successfully installed fastapi-0.141.1"]) == ""
+
+
+def test_launcher_kills_pip_that_hangs():
+    """Ячейка, висящая до конца сессии, хуже внятной ошибки."""
+    progress = SilentProgress()
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+    started = time.monotonic()
+    code, log, expired = notebook._run_pip(command, dict(os.environ), progress, timeout=1)
+
+    assert expired is True
+    assert time.monotonic() - started < 20, "процесс должен быть убит, а не дождан"
+    assert code != 0
+
+
+def test_launcher_install_does_not_leave_pip_behind(monkeypatch, pip_log):
+    """Прервали ячейку — pip не должен пережить её и дальше грызть индекс."""
+    killed: list[bool] = []
+
+    class Interrupting(FakePip):
+        def wait(self, timeout=None):
+            raise KeyboardInterrupt
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            killed.append(True)
+
+        def kill(self):
+            killed.append(True)
+
+    monkeypatch.setattr(notebook.subprocess, "Popen", lambda command, **kw: Interrupting())
+    with pytest.raises(KeyboardInterrupt):
+        notebook.install(["fastapi"], "")
+
+    assert killed, "процесс pip остался жив"
 
 
 def test_launcher_finds_the_project_root(tmp_path):
