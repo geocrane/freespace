@@ -10,10 +10,11 @@ from __future__ import annotations
 import os
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+from ..core import env
 from ..core.platform_utils import (
     default_root,
     human_size,
@@ -42,9 +43,21 @@ from ..service.presenter import (
     layout_tiles,
     search_rows,
 )
+from ..service.access import (
+    AccessGuard,
+    LockedError,
+    PinNotSet,
+    TooManyAttempts,
+    WrongPin,
+)
 from ..service.progress import Operations, track
 from ..service.scan_service import RUNNING, ScanService
 from ..service.trash_service import TrashService
+
+# Заголовок с токеном разблокировки. Один механизм и для GET, и для POST:
+# складывать токен то в строку запроса, то в тело значит завести два места, где
+# он может потеряться.
+UNLOCK_HEADER = "X-FreeSpace-Unlock"
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -81,6 +94,15 @@ class PathsRequest(BaseModel):
     op: str = ""
 
 
+class PinRequest(BaseModel):
+    pin: str
+
+
+class RootRequest(BaseModel):
+    path: str
+    label: str = ""
+
+
 # Потолок на одну пачку. Он же — потолок набора, который отдаётся странице для
 # отметки: «выбрать все» должно означать все найденные, а не только показанные,
 # и одно ограничение на оба конца пути честнее, чем два разных.
@@ -89,11 +111,16 @@ class PathsRequest(BaseModel):
 MAX_BULK_PATHS = 50000
 
 
-def _job_state(job) -> dict:
-    """Состояние задачи в виде, пригодном для опроса из браузера."""
+def _job_state(job, guard=None) -> dict:
+    """Состояние задачи в виде, пригодном для опроса из браузера.
+
+    ``network`` страница использует не для запретов — их ставит сервер, — а
+    чтобы показать, что разбирается общий диск, и предупредить перед удалением.
+    """
     data = {
         "id": job.id,
         "root_path": job.root_path,
+        "network": bool(guard is not None and guard.is_network(job.root_path)),
         "state": job.state,
         "scanned": job.scanned,
         "current_path": job.current_path,
@@ -130,9 +157,11 @@ def create_app(root_path: str = "", allow_delete: bool = True,
     service = ScanService()
     trash_service = TrashService(service)
     operations = Operations()
+    guard = AccessGuard()
     app.state.service = service
     app.state.trash = trash_service
     app.state.operations = operations
+    app.state.guard = guard
     app.state.allow_delete = allow_delete
     app.state.local = local
 
@@ -159,6 +188,25 @@ def create_app(root_path: str = "", allow_delete: bool = True,
                        "разрешить стирать файлы по сети, его нужно запустить с ключом "
                        "--allow-delete.",
             )
+
+    def _guard(path: str, token: str) -> None:
+        """Сетевой путь — только по PIN. Локальные проходят молча."""
+        try:
+            guard.check(path, token)
+        except LockedError as exc:
+            # 423 Locked: не «нельзя никогда», как 403, а «заперто, откройте».
+            raise HTTPException(status_code=423, detail=str(exc)) from exc
+
+    def _guarded_job(job_id: str, token: str):
+        """Задача, корень которой разрешено трогать этому запросу.
+
+        Проверять достаточно корень: удалять и так можно только внутри него
+        (``trash.ensure_deletable``), а по симлинкам обход не ходит — путь из
+        локального дерева не может незаметно указывать на шару.
+        """
+        job = _job_or_404(job_id)
+        _guard(job.root_path, token)
+        return job
 
     def _job_or_404(job_id: str):
         job = service.get(job_id)
@@ -191,12 +239,20 @@ def create_app(root_path: str = "", allow_delete: bool = True,
             return fh.read()
 
     @app.get("/api/config")
-    def config() -> JSONResponse:
+    def config(unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
         """Что умеет этот запуск — страница по этому решает, что показывать."""
         return JSONResponse({
             "allow_delete": app.state.allow_delete,
             "local": app.state.local,
             "categories": CATEGORY_LABELS,
+            # Задан ли PIN и открыт ли замок сейчас. Без первого страница не
+            # предлагает вводить комбинацию, а объясняет, как её завести.
+            "pin_set": guard.has_pin,
+            "unlocked": guard.is_unlocked(unlock),
+            # Где лежит PIN — чтобы страница могла назвать файл, а не гонять
+            # человека искать его по подсказке «где-то рядом с приложением».
+            "env_path": env.env_path(),
+            "network": True,
             # Страница читается с диска на каждый запрос, а маршруты живут в
             # уже запущенном процессе. Свежий интерфейс поверх старого сервера
             # молча упирался бы в 404 — пусть лучше скажет об этом сразу.
@@ -208,9 +264,17 @@ def create_app(root_path: str = "", allow_delete: bool = True,
         })
 
     @app.get("/api/volumes")
-    def volumes() -> JSONResponse:
+    def volumes(unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
+        """Тома, которые этому запросу разрешено видеть.
+
+        Пока замок закрыт, сетевых дисков в списке нет вовсе — ни подключённых
+        букв, ни вписанных руками шар. Показать их серыми и неактивными значило
+        бы рассказать всем, какие шары есть, а просили обратного.
+        """
+        unlocked = guard.is_unlocked(unlock)
+        roots = [r.path for r in guard.roots] if unlocked else []
         items = []
-        for vol in list_volumes():
+        for vol in list_volumes(include_network=unlocked, extra_roots=roots):
             item = asdict(vol)
             item["total_human"] = human_size(vol.total)
             item["free_human"] = human_size(vol.free)
@@ -219,15 +283,17 @@ def create_app(root_path: str = "", allow_delete: bool = True,
         # "default" — что подставить в поле пути при открытии страницы. В
         # Linux-контейнере это не домашний каталог, а монтирование с данными.
         return JSONResponse({"volumes": items, "home": os.path.expanduser("~"),
-                             "default": default_root()})
+                             "default": default_root(), "unlocked": unlocked})
 
     # --- сканирование -----------------------------------------------------
 
     @app.post("/api/scan")
-    def start_scan(request: ScanRequest) -> JSONResponse:
+    def start_scan(request: ScanRequest,
+                   unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
         if request.size_mode not in (SIZE_DISK, SIZE_APPARENT):
             raise HTTPException(status_code=400,
                                 detail="Неизвестный способ подсчёта размера.")
+        _guard(request.path, unlock)
         try:
             job = service.start(
                 request.path,
@@ -238,22 +304,24 @@ def create_app(root_path: str = "", allow_delete: bool = True,
             )
         except (NotADirectoryError, PermissionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(_job_state(job))
+        return JSONResponse(_job_state(job, guard))
 
     @app.get("/api/scan/{job_id}")
     def scan_status(job_id: str) -> JSONResponse:
-        return JSONResponse(_job_state(_job_or_404(job_id)))
+        return JSONResponse(_job_state(_job_or_404(job_id), guard))
 
     @app.post("/api/rescan")
-    def rescan(request: PathRequest) -> JSONResponse:
+    def rescan(request: PathRequest,
+               unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
         """Обойти заново только указанную папку."""
+        _guarded_job(request.job, unlock)
         try:
             job = service.rescan(request.job, request.path or None)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (NotADirectoryError, PermissionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(_job_state(job))
+        return JSONResponse(_job_state(job, guard))
 
     @app.delete("/api/scan/{job_id}")
     def cancel_scan(job_id: str) -> JSONResponse:
@@ -304,6 +372,10 @@ def create_app(root_path: str = "", allow_delete: bool = True,
         kind: str = ANY,
         min_size: int = 0,
         max_size: int | None = None,
+        # Время последней активности, unix-секунды. "before" — то, чего не
+        # трогали с этой даты: ровно вопрос «что тут залежалось».
+        modified_before: float | None = None,
+        modified_after: float | None = None,
         category: list[str] = Query(default=[]),
         top_only: bool = Query(False, description="прятать находки внутри других находок"),
         group: bool = False,
@@ -329,6 +401,8 @@ def create_app(root_path: str = "", allow_delete: bool = True,
             min_size=max(0, min_size),
             max_size=max_size,
             categories=tuple(category),
+            modified_before=modified_before,
+            modified_after=modified_after,
             top_level_only=top_only,
         )
         if flt.is_empty():
@@ -367,8 +441,11 @@ def create_app(root_path: str = "", allow_delete: bool = True,
     # --- удаление и корзина ------------------------------------------------
 
     @app.post("/api/delete")
-    def delete(request: PathRequest) -> JSONResponse:
+    def delete(request: PathRequest,
+               unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
         _need_delete()
+        _guarded_job(request.job, unlock)
+        _guard(request.path, unlock)
         try:
             with track(operations, request.op, "delete") as progress:
                 entry = trash_service.delete(request.job, request.path, progress)
@@ -385,9 +462,11 @@ def create_app(root_path: str = "", allow_delete: bool = True,
         return JSONResponse(data)
 
     @app.post("/api/delete-many")
-    def delete_many(request: PathsRequest) -> JSONResponse:
+    def delete_many(request: PathsRequest,
+                    unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
         """Убрать в корзину пачку объектов, отмеченных галочками."""
         _need_delete()
+        _guarded_job(request.job, unlock)
         if not request.paths:
             raise HTTPException(status_code=400, detail="Не отмечено ни одного объекта.")
         if len(request.paths) > MAX_BULK_PATHS:
@@ -421,7 +500,8 @@ def create_app(root_path: str = "", allow_delete: bool = True,
         })
 
     @app.get("/api/trash")
-    def trash_list(job: str) -> JSONResponse:
+    def trash_list(job: str, unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
+        _guarded_job(job, unlock)
         try:
             trash = trash_service.for_job(job)
             available = trash.available
@@ -442,8 +522,10 @@ def create_app(root_path: str = "", allow_delete: bool = True,
         })
 
     @app.post("/api/trash/restore")
-    def trash_restore(request: EntryRequest) -> JSONResponse:
+    def trash_restore(request: EntryRequest,
+                      unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
         _need_delete()
+        _guarded_job(request.job, unlock)
         try:
             restored = trash_service.restore(request.job, request.entry)
         except TrashError as exc:
@@ -451,8 +533,10 @@ def create_app(root_path: str = "", allow_delete: bool = True,
         return JSONResponse({"restored": restored})
 
     @app.post("/api/trash/empty")
-    def trash_empty(request: EntryRequest) -> JSONResponse:
+    def trash_empty(request: EntryRequest,
+                    unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
         _need_delete()
+        _guarded_job(request.job, unlock)
         try:
             with track(operations, request.op, "empty") as progress:
                 count, freed = trash_service.empty(request.job, progress)
@@ -471,6 +555,70 @@ def create_app(root_path: str = "", allow_delete: bool = True,
         спрашивает ещё раз, а 404 пришлось бы отличать от настоящих.
         """
         return JSONResponse(operations.snapshot(token))
+
+    # --- замок на сетевые папки --------------------------------------------
+
+    @app.post("/api/unlock")
+    def unlock_network(request: PinRequest) -> JSONResponse:
+        """Открыть доступ к сетевым папкам на эту сессию."""
+        try:
+            token, ttl = guard.unlock(request.pin)
+        except PinNotSet as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except TooManyAttempts as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except WrongPin as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return JSONResponse({"token": token, "expires_in": ttl,
+                             "roots": [r.as_dict() for r in guard.roots]})
+
+    @app.post("/api/lock")
+    def lock_network(unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
+        return JSONResponse({"locked": guard.lock(unlock)})
+
+    def _need_unlocked(token: str) -> None:
+        if not guard.is_unlocked(token):
+            raise HTTPException(
+                status_code=423,
+                detail="Список сетевых папок открывается по PIN.",
+            )
+
+    @app.get("/api/network-roots")
+    def network_roots(unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
+        _need_unlocked(unlock)
+        return JSONResponse({"roots": [r.as_dict() for r in guard.roots]})
+
+    @app.post("/api/network-roots")
+    def add_network_root(request: RootRequest,
+                         unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
+        """Запомнить сетевую папку. Список ведётся руками — угадывать шары в
+        сети приложение не пытается."""
+        _need_unlocked(unlock)
+        path = request.path.strip()
+        if not path:
+            raise HTTPException(status_code=400, detail="Не указан путь.")
+        expanded = os.path.abspath(os.path.expanduser(path)) if not path.startswith("\\\\") else path
+        if not os.path.isdir(expanded):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Папка {path} не найдена. Проверьте, что диск подключён "
+                       "и путь написан целиком, например \\\\сервер\\общая.",
+            )
+        if not os.access(expanded, os.R_OK):
+            raise HTTPException(status_code=400,
+                                detail=f"Нет доступа на чтение к {path}.")
+        root = guard.add_root(path, request.label.strip())
+        return JSONResponse({"root": root.as_dict(),
+                             "roots": [r.as_dict() for r in guard.roots]})
+
+    @app.delete("/api/network-roots")
+    def remove_network_root(path: str,
+                            unlock: str = Header("", alias=UNLOCK_HEADER)) -> JSONResponse:
+        """Убрать папку из списка. Файлы на шаре при этом не трогаются."""
+        _need_unlocked(unlock)
+        removed = guard.remove_root(path)
+        return JSONResponse({"removed": removed,
+                             "roots": [r.as_dict() for r in guard.roots]})
 
     # --- кэш ---------------------------------------------------------------
 

@@ -1,4 +1,10 @@
-"""Поиск по дереву в памяти: по имени, шаблону, размеру, дате и типу файлов."""
+"""Поиск по дереву в памяти: по имени, шаблону, размеру, дате и типу файлов.
+
+Отбор по дате идёт не по времени изменения, а по времени последней активности
+(``scanner._activity``), свёрнутому по поддереву: «папки, в которых ни один
+файл не трогали за год» — это один ``float``-сравнение на узел, без каких-либо
+обращений к диску.
+"""
 
 from __future__ import annotations
 
@@ -87,6 +93,12 @@ class SearchFilter:
     min_size: int = 0
     max_size: int | None = None
     categories: tuple[str, ...] = field(default_factory=tuple)
+    # Время последней активности строго раньше / строго позже указанного
+    # (unix-секунды). У папки это самое свежее время среди файлов внутри,
+    # поэтому ``modified_before`` отвечает ровно на вопрос «ни один файл в этой
+    # папке не трогали с такого-то числа».
+    modified_before: float | None = None
+    modified_after: float | None = None
     # Не показывать находку, если её предок тоже подошёл. Без этого поиск
     # node_modules выдаёт заодно все вложенные node_modules — список раздут,
     # а полезна в нём только верхняя строка: удалять будут её.
@@ -97,6 +109,7 @@ class SearchFilter:
         return (
             not self.term and self.kind == ANY and self.min_size <= 0
             and self.max_size is None and not self.categories
+            and self.modified_before is None and self.modified_after is None
         )
 
     def matches(self, node: FileNode) -> bool:
@@ -112,6 +125,14 @@ class SearchFilter:
             # Каталоги по типу файлов не отбираются — у них нет расширения.
             if node.is_dir or category_of(node.name) not in self.categories:
                 return False
+        if self.modified_before is not None:
+            # Ноль — времени нет вовсе: stat не удался (обычное дело на сетевых
+            # дисках с урезанными правами). Молча записывать такое в «старьё»
+            # значит предлагать удалить то, о чём мы ничего не знаем.
+            if not node.mtime or node.mtime >= self.modified_before:
+                return False
+        if self.modified_after is not None and node.mtime <= self.modified_after:
+            return False
         if self.term:
             name_low = node.name.lower()
             term_low = self.term.lower()

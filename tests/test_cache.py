@@ -166,3 +166,45 @@ def _age_snapshot(path, hours):
     lines[0] = json.dumps(header, ensure_ascii=False)
     with gzip.open(path, "wt", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
+
+
+# --- время последней активности в снимке ------------------------------------
+
+
+def test_folded_time_survives_the_snapshot(sample_tree, tmp_path):
+    """Снимок хранит уже свёрнутое время: пересчитывать его после загрузки не
+    нужно, иначе поиск залежавшегося по кэшу врал бы."""
+    result = scan(sample_tree, size_mode=SIZE_APPARENT)
+    cache = Cache(dir_path=str(tmp_path / "cache"))
+    cache.save_snapshot(result.root, size_mode=SIZE_APPARENT)
+
+    loaded = cache.load_snapshot(sample_tree)
+    before = {n.path: int(n.mtime) for n in result.root.iter_subtree()}
+    after = {n.path: int(n.mtime) for n in loaded.iter_subtree()}
+    assert before == after
+    # Именно свёрнутое, а не собственное время каталога.
+    docs = next(c for c in loaded.children if c.name == "docs")
+    assert docs.mtime > 0
+
+
+def test_snapshot_of_the_previous_format_is_dropped(sample_tree, tmp_path):
+    """В прежних снимках в том же поле лежит st_mtime — другой смысл. Читать их
+    как свои значит показывать чужие числа под своей подписью."""
+    import json
+
+    cache_dir = tmp_path / "cache"
+    cache = Cache(dir_path=str(cache_dir))
+    cache.save_snapshot(scan(sample_tree, size_mode=SIZE_APPARENT).root,
+                        size_mode=SIZE_APPARENT)
+
+    snapshot_file = next(p for p in cache_dir.iterdir() if p.name.endswith(SUFFIX))
+    with gzip.open(snapshot_file, "rt", encoding="utf-8") as fh:
+        lines = fh.read().split("\n")
+    header = json.loads(lines[0])
+    header["v"] = 1
+    lines[0] = json.dumps(header, ensure_ascii=False)
+    with gzip.open(snapshot_file, "wt", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+
+    assert cache.load_snapshot(sample_tree) is None
+    assert cache.latest_snapshot(sample_tree) is None

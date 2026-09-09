@@ -44,6 +44,17 @@
     border: 1px solid var(--line); cursor: pointer; background: var(--panel); }
   .chip:hover { border-color: var(--accent); }
   .chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  /* Сетевой диск отличается от локального цветом, а не только значком: перед
+     удалением важно с одного взгляда понимать, чьи это файлы. */
+  .chip.net { border-color: var(--warn); color: var(--warn); }
+  .chip.net:hover { border-color: var(--warn); background: rgba(154,103,0,.12); }
+  .chip.lock { border-style: dashed; color: var(--muted); }
+
+  /* Полоса «вы разбираете общий диск». Занимает место только когда нужна:
+     на своём диске никакого предупреждения быть не должно. */
+  #netbar { flex: none; padding: 7px 14px; font-size: 13.5px; color: var(--warn);
+            background: rgba(154,103,0,.13); border-bottom: 1px solid var(--warn); }
+  #netbar b { font-weight: 600; }
   .status { font-size: 14px; color: var(--muted); margin-top: 7px; min-height: 21px; }
   .status b { color: var(--fg); font-weight: 600; }
   .err { color: var(--bad); }
@@ -52,6 +63,9 @@
 
   #filters { margin-top: 8px; gap: 6px; font-size: 13.5px; color: var(--muted); }
   #filters input[type=number] { width: 122px; }
+  #filters input[type=date] { font: inherit; font-size: 13.5px; padding: 5px 7px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+    color: inherit; }
   #filters select { font-size: 13.5px; padding: 5px 7px; }
 
   nav { padding: 8px 14px; border-bottom: 1px solid var(--line); font-size: 14px;
@@ -133,6 +147,10 @@
   td.num { text-align: right; font-variant-numeric: tabular-nums; width: 82px; max-width: none; }
   td.pct { text-align: right; width: 48px; max-width: none; opacity: .65; }
   td.act { width: 62px; max-width: none; text-align: right; }
+  /* Дата последней активности. Приглушена: это справка, по которой проверяют
+     находку, а не то, за чем идут в таблицу в первую очередь. */
+  td.when { width: 92px; max-width: none; text-align: right; color: var(--muted);
+            font-size: 13px; font-variant-numeric: tabular-nums; }
   tr.dir td.name { color: var(--accent); cursor: pointer; }
   tr.dir td.name:hover { text-decoration: underline; }
   tr:hover td.act .rowbtn { visibility: visible; }
@@ -196,6 +214,8 @@
   <div class="status" id="status"></div>
 </header>
 
+<div id="netbar" class="hidden"></div>
+
 <nav id="crumbs"></nav>
 
 <main>
@@ -231,6 +251,8 @@
         <select id="f-cat" title="Отобрать по виду содержимого — расширение файла подскажет, что это. К папкам не применяется."><option value="">любой вид файлов</option></select>
         <input type="number" id="f-min" placeholder="больше, МБ" min="0"
                title="Показывать только то, что больше указанного размера в мегабайтах.">
+        <label class="opt" title="Показать только то, что с этой даты не трогали. Для папки это значит «ни один файл внутри не менялся и не появлялся с тех пор»: одного свежего файла хватает, чтобы папка в список не попала.">не трогали с
+          <input type="date" id="f-before"></label>
         <label class="opt" title="Если целая папка подошла под условие, то и все папки внутри неё подошли автоматически. С галочкой в списке останется только верхняя — её и надо удалять.">
           <input type="checkbox" id="f-top"> скрывать вложенные результаты</label>
         <label class="opt" title="Сведёт одноимённые находки в одну строку и покажет, сколько их и сколько они занимают вместе. Так сразу видно общий вес всех venv или всех __pycache__.">
@@ -245,6 +267,7 @@
         <span class="chip" data-preset="pycache">__pycache__</span>
         <span class="chip" data-preset="notebooks">автосохранения Jupyter</span>
         <span class="chip" data-preset="venv">виртуальные окружения</span>
+        <span class="chip" data-preset="stale" title="Папки, в которых за последний год не менялся и не появлялся ни один файл. Самые верхние — вложенные в них не показываются.">не трогали больше года</span>
       </div>
       <div id="search-result"><div class="empty">Укажите, что искать, и нажмите «Найти».
         <small>Или нажмите готовый набор условий выше — например «__pycache__»,
@@ -268,10 +291,40 @@
   </aside>
 </main>
 
+<dialog id="pin">
+  <h3 id="pin-title">Сетевые диски</h3>
+  <p class="sub" id="pin-note"></p>
+  <div class="row"><input type="password" id="pin-code" inputmode="numeric"
+       placeholder="PIN" style="flex:1" autocomplete="off"></div>
+  <p class="sub err hidden" id="pin-error"></p>
+  <div class="dlg-actions">
+    <button id="pin-no">Отмена</button>
+    <button class="primary" id="pin-yes">Открыть</button>
+  </div>
+</dialog>
+
+<dialog id="roots">
+  <h3>Сетевые папки</h3>
+  <p class="sub">Список ведётся руками: впишите путь целиком, например
+    <b>\\сервер\общая</b> или <b>Z:\Отдел</b>. Он запомнится до следующего запуска
+    и появится кнопкой в шапке.</p>
+  <div id="roots-list"></div>
+  <div class="row" style="margin-top:10px">
+    <input type="text" id="root-path" placeholder="\\сервер\общая" spellcheck="false"
+           style="flex:1">
+    <input type="text" id="root-label" placeholder="подпись (необязательно)"
+           spellcheck="false" style="width:150px">
+    <button id="root-add">Добавить</button>
+  </div>
+  <p class="sub err hidden" id="roots-error"></p>
+  <div class="dlg-actions"><button id="roots-close">Готово</button></div>
+</dialog>
+
 <dialog id="confirm">
   <h3 id="confirm-title">Удалить?</h3>
   <p id="confirm-path"></p>
   <p class="sub" id="confirm-note"></p>
+  <p class="note hidden" id="confirm-net"></p>
   <div class="dlg-actions">
     <button id="confirm-no">Отмена</button>
     <button class="destructive" id="confirm-yes">Удалить</button>
@@ -284,7 +337,10 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const MB = 1024 * 1024;
 
-let config = {allow_delete: false, local: false, categories: {}};
+let config = {allow_delete: false, local: false, categories: {},
+              network: false, pin_set: false, unlocked: false};
+// Разбираемый сейчас корень лежит на общем сетевом диске.
+let rootIsNetwork = false;
 let groupItems = new Map();
 // Строки открытой сейчас папки — их тоже можно отмечать и удалять пачкой.
 let lastChildren = [];
@@ -295,11 +351,31 @@ let jobId = null, rootPath = '', currentPath = '';
 let pollTimer = null, resizeTimer = null, tab = 'children';
 let lastSearch = null;
 
+// Токен разблокировки сетевых папок. Живёт во вкладке, а не в localStorage:
+// закрыли вкладку — замок снова закрыт, как и на сервере после перезапуска.
+let unlockToken = sessionStorage.getItem('freespace-unlock') || '';
+
+function setUnlockToken(token) {
+  unlockToken = token || '';
+  if (token) sessionStorage.setItem('freespace-unlock', token);
+  else sessionStorage.removeItem('freespace-unlock');
+}
+
 // Все запросы относительными URL: иначе за jupyter-server-proxy всё отвалится.
 async function api(path, options) {
-  const response = await fetch(path, options);
+  const opts = Object.assign({}, options);
+  // Токен подставляется в одном месте на все запросы: разложить его по вызовам
+  // значит однажды забыть в одном из них и получить необъяснимое «заперто».
+  opts.headers = Object.assign({}, opts.headers,
+    unlockToken ? {'X-FreeSpace-Unlock': unlockToken} : {});
+  const response = await fetch(path, opts);
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || response.status + ' ' + response.statusText);
+  if (!response.ok) {
+    // 423 — заперто: токен протух или его не было. Замок закрываем и на
+    // странице, иначе кнопки продолжают обещать доступ, которого нет.
+    if (response.status === 423) { setUnlockToken(''); loadVolumes(false).catch(() => {}); }
+    throw new Error(body.detail || response.status + ' ' + response.statusText);
+  }
   return body;
 }
 const send = (method, path, data) => api(path, {
@@ -325,6 +401,24 @@ function whenText(seconds) {
   return d.toLocaleString('ru', {day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit'});
 }
 
+// Ноль означает «времени нет»: stat не удался, обычное дело на сетевых дисках
+// с урезанными правами. Выдумывать за него 1970 год нельзя — по этой колонке
+// решают, что удалять.
+function whenShort(seconds) {
+  if (!seconds) return '—';
+  const d = new Date(seconds * 1000);
+  return d.toLocaleDateString('ru', {day: '2-digit', month: '2-digit', year: '2-digit'});
+}
+
+function whenFull(seconds) {
+  if (!seconds) return 'Время неизвестно: не удалось прочитать сведения о файле.';
+  const days = Math.floor((Date.now() - seconds * 1000) / 86400000);
+  const ago = days < 1 ? 'сегодня'
+    : days < 400 ? `${days} ${plural(days, 'день', 'дня', 'дней')} назад`
+    : `${Math.floor(days / 365)} ${plural(Math.floor(days / 365), 'год', 'года', 'лет')} назад`;
+  return `${whenText(seconds)} — ${ago}`;
+}
+
 // --- запуск --------------------------------------------------------------
 
 // Свободное место спрашиваем у системы заново после каждого действия, которое
@@ -336,21 +430,132 @@ async function loadVolumes(fillPath) {
   // Сервер знает лучше, с чего начинать: в Linux-контейнере это монтирование
   // с данными, а не служебный домашний каталог.
   if (fillPath && !$('path').value) $('path').value = vols.default || vols.home || '';
+  config.unlocked = vols.unlocked;
   $('chips').innerHTML = vols.volumes.map(v =>
-    `<span class="chip" data-pick="${esc(v.path)}"
-       title="Занято ${esc(v.total_human)} всего, свободно ${esc(v.free_human)}">${esc(v.path)}
-     <span style="opacity:.6">${esc(v.free_human)} своб.</span></span>`).join('');
+    `<span class="chip${v.network ? ' net' : ''}" data-pick="${esc(v.path)}"
+       title="${v.network ? 'Общий сетевой диск: эти файлы видит не только вы. ' : ''}Занято ${esc(v.total_human)} всего, свободно ${esc(v.free_human)}">${v.network ? '🌐 ' : ''}${esc(v.path)}
+     <span style="opacity:.6">${esc(v.free_human)} своб.</span></span>`).join('')
+    + lockChip();
 }
 
+// Кнопка замка. Три состояния, и в каждом она говорит своё: PIN не задан —
+// объясняет, как его завести; замок закрыт — зовёт открыть; открыт — даёт
+// править список и закрыть обратно.
+function lockChip() {
+  if (!config.network) return '';
+  if (!config.pin_set)
+    return `<span class="chip lock" data-lock="help"
+      title="Сетевые папки закрыты PIN-кодом, но строка FREESPACE_PIN в файле настроек пуста — открыть их нечем.">🔒 сетевые диски</span>`;
+  if (!config.unlocked)
+    return `<span class="chip lock" data-lock="open"
+      title="Показать сетевые папки. Это защита от случайного удаления, а не разграничение доступа к файлам.">🔒 сетевые диски</span>`;
+  return `<span class="chip net" data-lock="roots" title="Добавить или убрать сетевую папку из списка">⚙ список сетевых папок</span>
+          <span class="chip lock" data-lock="close" title="Скрыть сетевые папки до следующего ввода PIN">🔓 закрыть доступ</span>`;
+}
+
+// --- замок ----------------------------------------------------------------
+
+function askPin() {
+  if (!config.pin_set) {
+    setStatus('PIN на сетевые папки не задан: строка <b>FREESPACE_PIN</b> в файле ' +
+              `<b>${esc(config.env_path || '.env')}</b> пуста. Впишите комбинацию ` +
+              'и перезапустите приложение.', true);
+    return;
+  }
+  $('pin-note').textContent = 'Введите PIN, чтобы увидеть сетевые папки. ' +
+    'Это защита от случайного удаления, а не разграничение доступа: файлы на ' +
+    'общем диске остаются доступны через Проводник всем, у кого есть к ним права.';
+  $('pin-code').value = '';
+  $('pin-error').classList.add('hidden');
+  $('pin').showModal();
+  $('pin-code').focus();
+}
+
+async function doUnlock() {
+  const pin = $('pin-code').value;
+  if (!pin) return;
+  try {
+    const res = await postJSON('api/unlock', {pin: pin});
+    setUnlockToken(res.token);
+    $('pin').close();
+    await loadVolumes(false);
+    setStatus('Сетевые папки открыты. Они помечены 🌐 и рыжим цветом — ' +
+              'удаление там задевает чужую работу.');
+  } catch (e) {
+    $('pin-error').textContent = e.message;
+    $('pin-error').classList.remove('hidden');
+    $('pin-code').select();
+  }
+}
+
+async function doLock() {
+  await postJSON('api/lock', {}).catch(() => {});
+  setUnlockToken('');
+  await loadVolumes(false).catch(() => {});
+  setStatus('Сетевые папки снова скрыты.');
+}
+
+// --- список сетевых папок --------------------------------------------------
+
+function renderRoots(roots) {
+  $('roots-list').innerHTML = roots.length
+    ? `<table>${roots.map(r => `<tr>
+         <td class="name" title="${esc(r.path)}">🌐 ${esc(r.path)}
+           ${r.label ? `<div class="sub">${esc(r.label)}</div>` : ''}</td>
+         <td class="act"><button class="rowbtn" data-rootdel="${esc(r.path)}"
+             title="Убрать из списка. Файлы на диске при этом не трогаются.">✕</button></td>
+       </tr>`).join('')}</table>`
+    : '<div class="empty">Пока ничего не добавлено.</div>';
+}
+
+async function openRoots() {
+  $('roots-error').classList.add('hidden');
+  $('root-path').value = '';
+  $('root-label').value = '';
+  try { renderRoots((await api('api/network-roots')).roots); }
+  catch (e) { setStatus(esc(e.message), true); return; }
+  $('roots').showModal();
+}
+
+async function addRoot() {
+  const path = $('root-path').value.trim();
+  if (!path) return;
+  try {
+    const res = await postJSON('api/network-roots',
+      {path: path, label: $('root-label').value.trim()});
+    renderRoots(res.roots);
+    $('root-path').value = '';
+    $('root-label').value = '';
+    $('roots-error').classList.add('hidden');
+    loadVolumes(false).catch(() => {});
+  } catch (e) {
+    $('roots-error').textContent = e.message;
+    $('roots-error').classList.remove('hidden');
+  }
+}
+
+async function removeRoot(path) {
+  try {
+    const res = await api('api/network-roots?path=' + encodeURIComponent(path),
+                          {method: 'DELETE'});
+    renderRoots(res.roots);
+    loadVolumes(false).catch(() => {});
+  } catch (e) {
+    $('roots-error').textContent = e.message;
+    $('roots-error').classList.remove('hidden');
+  }
+}
+
+// Список томов запрашивается после настроек: без них неизвестно, задан ли PIN,
+// и кнопку замка пришлось бы дорисовывать вторым заходом.
 api('api/config').then(cfg => {
-  config = cfg;
+  config = Object.assign(config, cfg);
   $('f-cat').innerHTML = '<option value="">любой тип</option>' +
     Object.entries(cfg.categories).map(([k, label]) =>
       `<option value="${esc(k)}">${esc(label)}</option>`).join('');
-}).catch(e => setStatus('Не удалось получить настройки: ' + esc(e.message), true));
-
-loadVolumes(true).catch(
-  e => setStatus('Не удалось получить список дисков: ' + esc(e.message), true));
+}).catch(e => setStatus('Не удалось получить настройки: ' + esc(e.message), true))
+  .finally(() => loadVolumes(true).catch(
+    e => setStatus('Не удалось получить список дисков: ' + esc(e.message), true)));
 
 // --- сканирование --------------------------------------------------------
 
@@ -448,10 +653,23 @@ function showFinished(job) {
             '. Каждую можно просканировать отдельно, указав её путь вверху.</span>';
   setStatus(text);
   rootPath = job.root_path;
+  showNetBar(job.network, job.root_path);
   const back = viewAfterScan;
   viewAfterScan = '';
   loadTree(back || job.root_path);
   loadVolumes(false).catch(() => {});
+}
+
+// Общий диск виден не по одному значку в углу: пока он открыт, полоса висит
+// над всем окном. Удаление здесь задевает не только того, кто нажал кнопку.
+function showNetBar(isNetwork, path) {
+  rootIsNetwork = !!isNetwork;
+  const bar = $('netbar');
+  bar.classList.toggle('hidden', !isNetwork);
+  if (isNetwork)
+    bar.innerHTML = `🌐 <b>Общий сетевой диск</b> ${esc(path)} — эти файлы видит ` +
+      `не только вы, и удалённое пропадёт у всех. Корзина создаётся на самой шаре, ` +
+      `так что вернуть удалённое можно, пока её не очистили.`;
 }
 
 // --- дерево и treemap ----------------------------------------------------
@@ -624,7 +842,9 @@ function rowsTable(rows, withParent, selectable) {
   return `<table>
     <tr>${pick ? '<th class="chk"></th>' : ''}<th>Имя</th>
         <th style="text-align:right">Размер</th>
-        <th style="text-align:right">%</th><th></th></tr>` +
+        <th style="text-align:right">%</th>
+        <th style="text-align:right" title="Самое свежее из времени изменения файла и времени, когда он появился на этом диске. У папки — по самому свежему файлу внутри. Второе нужно потому, что при копировании время изменения переезжает вместе с файлом: принесённый вчера архив показывает позапрошлый год.">Трогали</th>
+        <th></th></tr>` +
     rows.map(r => `
       <tr class="${r.drillable ? 'dir' : ''}" data-row="${esc(r.path)}">
         ${pick ? (r.trash
@@ -644,6 +864,7 @@ function rowsTable(rows, withParent, selectable) {
         </td>
         <td class="num">${esc(r.size_human)}</td>
         <td class="pct">${r.percent.toFixed(1)}</td>
+        <td class="when" title="${esc(whenFull(r.mtime))}">${esc(whenShort(r.mtime))}</td>
         <td class="act">${rowActions(r)}</td>
       </tr>`).join('') + '</table>';
 }
@@ -661,6 +882,13 @@ function searchParams() {
   if (cat) params.append('category', cat);
   const min = parseFloat($('f-min').value);
   if (min > 0) params.set('min_size', Math.round(min * MB));
+  // <input type=date> отдаёт «2024-01-31»; на сервер уходят секунды, считая
+  // полночь по местному времени — по ней человек и рассуждает о датах.
+  const before = $('f-before').value;
+  if (before) {
+    const d = new Date(before + 'T00:00:00');
+    if (!isNaN(d)) params.set('modified_before', Math.round(d.getTime() / 1000));
+  }
   if ($('f-top').checked) params.set('top_only', 'true');
   if ($('f-group').checked) params.set('group', 'true');
   if ($('f-scope').checked && currentPath) params.set('path', currentPath);
@@ -937,6 +1165,11 @@ const PRESETS = {
   // группировки: имена различаются, и сводка распалась бы на строку про venv и
   // строку про .venv, тогда как нужен один список, который можно отметить.
   venv: {q: '*venv', mode: 'glob', kind: 'dirs'},
+
+  // Залежавшееся. Только папки и только самые верхние: если внутри папки за год
+  // ничего не трогали, то и во всех вложенных тоже — а разбирают всегда
+  // внешнюю. Удалять вслепую тут нечего, это список кандидатов на просмотр.
+  stale: {q: '', mode: 'substring', kind: 'dirs', top: true, staleDays: 365},
 };
 
 function applyPreset(name) {
@@ -949,6 +1182,16 @@ function applyPreset(name) {
   $('f-min').value = p.min || '';
   $('f-group').checked = !!p.group;
   $('f-top').checked = !!p.top;
+  if (p.staleDays) {
+    const d = new Date(Date.now() - p.staleDays * 86400000);
+    // toISOString считает по UTC и у нас может отдать вчерашний день; собираем
+    // дату из местных полей.
+    $('f-before').value = [d.getFullYear(),
+      String(d.getMonth() + 1).padStart(2, '0'),
+      String(d.getDate()).padStart(2, '0')].join('-');
+  } else {
+    $('f-before').value = '';
+  }
   runSearch();
 }
 
@@ -1047,6 +1290,11 @@ function ask({title, path, note, action}, callback) {
   $('confirm-path').textContent = path;
   $('confirm-note').textContent = note;
   $('confirm-yes').textContent = action;
+  // На общем диске цена ошибки другая: пропадёт не у одного человека.
+  $('confirm-net').textContent = rootIsNetwork
+    ? '🌐 Это общий сетевой диск. Файлы могут быть нужны коллегам — они пропадут и у них.'
+    : '';
+  $('confirm-net').classList.toggle('hidden', !rootIsNetwork);
   onConfirmed = callback;
   $('confirm').showModal();
 }
@@ -1175,7 +1423,7 @@ function switchTab(name) {
 document.addEventListener('click', event => {
   const el = event.target.closest('[data-go],[data-pick],[data-del],[data-reveal],' +
                                   '[data-restore],[data-preset],[data-tab],[data-empty],' +
-                                  '[data-group],[data-locate]');
+                                  '[data-group],[data-locate],[data-lock],[data-rootdel]');
   if (!el) return;
   if (event.target.matches('input[type=checkbox]')) return;
   if (el.dataset.go !== undefined) { loadTree(el.dataset.go); switchTab('children'); }
@@ -1191,6 +1439,12 @@ document.addEventListener('click', event => {
   else if (el.dataset.empty !== undefined)
     askEmptyTrash(el.dataset.empty, el.dataset.size || '');
   else if (el.dataset.group !== undefined) toggleGroup(el.dataset.group);
+  else if (el.dataset.rootdel !== undefined) removeRoot(el.dataset.rootdel);
+  else if (el.dataset.lock !== undefined) {
+    if (el.dataset.lock === 'close') doLock();
+    else if (el.dataset.lock === 'roots') openRoots();
+    else askPin();
+  }
 });
 
 // Галочки слушаем отдельно от кликов: change не срабатывает от клика по
@@ -1221,6 +1475,12 @@ $('confirm-yes').onclick = () => {
   if (callback) callback();
 };
 $('confirm-no').onclick = () => { onConfirmed = null; $('confirm').close(); };
+$('pin-yes').onclick = doUnlock;
+$('pin-no').onclick = () => $('pin').close();
+$('pin-code').addEventListener('keydown', e => { if (e.key === 'Enter') doUnlock(); });
+$('root-add').onclick = addRoot;
+$('roots-close').onclick = () => $('roots').close();
+$('root-path').addEventListener('keydown', e => { if (e.key === 'Enter') addRoot(); });
 $('path').addEventListener('keydown', e => { if (e.key === 'Enter') startScan(true); });
 $('q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
 

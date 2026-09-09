@@ -60,6 +60,9 @@ class VolumeInfo:
     # пользователя точно есть доступ. Обычно искать место нужно именно там, а не
     # по всему диску, где половина принадлежит системе.
     is_home: bool = False
+    # Общий сетевой диск: файлы на нём видит не один человек, и удаление там
+    # задевает чужую работу. Интерфейс помечает такие тома отдельно.
+    network: bool = False
 
 
 def disk_usage(path: str) -> VolumeInfo | None:
@@ -79,15 +82,61 @@ def disk_usage(path: str) -> VolumeInfo | None:
 CONTAINER_ROOT_SUFFIX = "/nfs"
 
 
-def list_volumes() -> list[VolumeInfo]:
+def is_network_volume(path: str, letters: set[str] | None = None) -> bool:
+    """Сетевой ли это том — по одному только пути, без файла настроек.
+
+    Отвечает на вопрос «эту букву подключили по сети»; полная проверка, которая
+    знает ещё и про список корней, живёт в ``core.settings.is_network_path``.
+    """
+    if path.startswith("\\\\") or (os.name == "nt" and path.startswith("//")):
+        return True
+    if letters is None:
+        from .settings import network_drive_letters
+
+        letters = network_drive_letters()
+    drive = os.path.splitdrive(path)[0]
+    return bool(drive) and drive.upper() in letters
+
+
+def list_volumes(include_network: bool = True,
+                 extra_roots: list[str] | None = None) -> list[VolumeInfo]:
     """Кандидаты в корни сканирования: тома и домашний каталог.
 
     В контейнере штатных «дисков» нет, поэтому список строится из того, что
     реально смонтировано и доступно на чтение.
+
+    ``include_network`` выключает показ сетевых дисков: пока замок закрыт,
+    подключённая буква ``Z:`` не должна вообще попадаться на глаза — иначе
+    «обычный пользователь их не видит» не выполняется, ведь внешне такая буква
+    ничем не отличается от локального диска. ``extra_roots`` — сетевые папки,
+    вписанные руками: их в системном списке томов нет вовсе.
     """
+    from .settings import network_drive_letters
+
+    letters = network_drive_letters()
+
+    def keep(path: str) -> bool:
+        return include_network or not is_network_volume(path, letters)
+
+    def described(paths: list[str]) -> list[VolumeInfo]:
+        """Собрать список и пометить вписанные руками корни сетевыми.
+
+        Сам по себе такой путь от локального не отличить: шара, подключённая
+        как ``Z:``, и обычная папка выглядят одинаково. Признак здесь один —
+        человек сам положил её в список сетевых.
+        """
+        volumes = _describe([p for p in paths if keep(p)] + list(extra_roots or ()),
+                            letters)
+        listed = {os.path.normcase(os.path.realpath(os.path.abspath(
+            os.path.expanduser(p)))) for p in extra_roots or ()}
+        for volume in volumes:
+            if os.path.normcase(volume.path) in listed:
+                volume.network = True
+        return volumes
+
     override = os.environ.get("FREESPACE_ROOTS")
     if override:
-        return _describe(override.split(os.pathsep))
+        return described(override.split(os.pathsep))
 
     # Домашний каталог первым на всех системах: на Windows его в списке не было
     # вовсе, предлагались только буквы дисков — а начинать разбор почти всегда
@@ -117,7 +166,7 @@ def list_volumes() -> list[VolumeInfo]:
             candidates += mounts
         candidates.append("/")
 
-    return _describe(candidates)
+    return described(candidates)
 
 
 def default_root() -> str:
@@ -147,16 +196,20 @@ def default_root() -> str:
     return os.path.expanduser("~")
 
 
-def _describe(paths: list[str]) -> list[VolumeInfo]:
+def _describe(paths: list[str], letters: set[str] | None = None) -> list[VolumeInfo]:
     """Отбросить недоступное и дубли, добрать сведения о свободном месте.
 
     Дубли ищутся по inode, а не по строке пути: на macOS ``/`` и
     ``/Volumes/Macintosh HD`` — это один и тот же каталог, и предлагать его
     дважды значит звать пользователя сканировать одно и то же.
+
+    Но на сетевых файловых системах Windows ``st_ino`` и ``st_dev`` равны нулю у
+    всех путей сразу, и по такому ключу из нескольких разных шар выживала бы
+    ровно одна. Где сведений нет — ключом становится сам путь.
     """
     home = os.path.realpath(os.path.expanduser("~"))
     volumes: list[VolumeInfo] = []
-    seen: set[tuple[int, int]] = set()
+    seen: set = set()
     for path in paths:
         norm = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
         if not os.path.isdir(norm) or not os.access(norm, os.R_OK):
@@ -165,13 +218,14 @@ def _describe(paths: list[str]) -> list[VolumeInfo]:
             stat = os.stat(norm)
         except OSError:
             continue
-        key = (stat.st_dev, stat.st_ino)
+        key = (stat.st_dev, stat.st_ino) if stat.st_ino else os.path.normcase(norm)
         if key in seen:
             continue
         seen.add(key)
         info = disk_usage(norm)
         if info is not None and info.total > 0:
             info.is_home = norm == home
+            info.network = is_network_volume(path, letters) or is_network_volume(norm, letters)
             volumes.append(info)
     return volumes
 

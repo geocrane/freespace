@@ -16,15 +16,16 @@ def _client(**kwargs):
     return fastapi_testclient.TestClient(create_app(**kwargs))
 
 
-def _scan(client, path, **body):
+def _scan(client, path, headers=None, **body):
     response = client.post("/api/scan", json={"path": path, "size_mode": "apparent",
-                                              "use_cache": False, **body})
+                                              "use_cache": False, **body},
+                           headers=headers)
     assert response.status_code == 200, response.text
     job = response.json()
     deadline = time.time() + 10
     while job["state"] == "running" and time.time() < deadline:
         time.sleep(0.02)
-        job = client.get(f"/api/scan/{job['id']}").json()
+        job = client.get(f"/api/scan/{job['id']}", headers=headers).json()
     assert job["state"] == "done", job
     return job
 
@@ -371,3 +372,123 @@ def test_trash_lists_every_trash_dir(sample_tree):
         assert data["available"] is True
         assert len(data["entries"]) == 1
         assert data["dirs"]
+
+
+# --- замок на сетевые папки -------------------------------------------------
+#
+# «Сетевым» здесь объявляется обычная временная папка: признак берётся из
+# списка корней в настройках, а поднимать в тестах настоящую шару незачем.
+
+
+def _with_pin(monkeypatch, root_path, pin="1234"):
+    """Задать PIN и список сетевых папок, собрать приложение поверх них."""
+    from freespace.core import settings as settings_module
+    from freespace.core.settings import NetworkRoot, Settings
+
+    monkeypatch.setenv("FREESPACE_PIN", pin)
+    settings_module.save(Settings(
+        network_roots=[NetworkRoot(path=root_path, label="Общий")]))
+    return fastapi_testclient.TestClient(create_app())
+
+
+def _unlock(client, pin="1234"):
+    response = client.post("/api/unlock", json={"pin": pin})
+    assert response.status_code == 200, response.text
+    return {"X-FreeSpace-Unlock": response.json()["token"]}
+
+
+def test_network_folders_are_invisible_until_the_pin(sample_tree, monkeypatch):
+    """Показать их серыми значило бы рассказать, какие шары есть."""
+    with _with_pin(monkeypatch, sample_tree) as client:
+        paths = [v["path"] for v in client.get("/api/volumes").json()["volumes"]]
+        assert sample_tree not in paths
+
+        head = _unlock(client)
+        shown = client.get("/api/volumes", headers=head).json()
+        assert sample_tree in [v["path"] for v in shown["volumes"]]
+        assert shown["unlocked"] is True
+        assert next(v for v in shown["volumes"]
+                    if v["path"] == sample_tree)["network"] is True
+
+
+def test_scanning_a_network_folder_needs_the_pin(sample_tree, monkeypatch):
+    with _with_pin(monkeypatch, sample_tree) as client:
+        response = client.post("/api/scan", json={"path": sample_tree,
+                                                  "size_mode": "apparent"})
+        assert response.status_code == 423, response.text
+
+        head = _unlock(client)
+        opened = client.post("/api/scan", json={"path": sample_tree,
+                                                "size_mode": "apparent",
+                                                "use_cache": False}, headers=head)
+        assert opened.status_code == 200, opened.text
+        assert opened.json()["network"] is True
+
+
+def test_deleting_from_a_network_folder_needs_the_pin(sample_tree, monkeypatch):
+    with _with_pin(monkeypatch, sample_tree) as client:
+        head = _unlock(client)
+        job = _scan(client, sample_tree, headers=head)
+
+        victim = os.path.join(sample_tree, "a.txt")
+        # Токен есть у сессии, но не у запроса — заперто.
+        locked = client.post("/api/delete", json={"job": job["id"], "path": victim})
+        assert locked.status_code == 423
+        assert os.path.exists(victim)
+
+        allowed = client.post("/api/delete", json={"job": job["id"], "path": victim},
+                              headers=head)
+        assert allowed.status_code == 200, allowed.text
+        assert not os.path.exists(victim)
+
+
+def test_wrong_pin_is_refused(sample_tree, monkeypatch):
+    with _with_pin(monkeypatch, sample_tree) as client:
+        assert client.post("/api/unlock", json={"pin": "0000"}).status_code == 403
+
+
+def test_the_root_list_is_behind_the_pin(sample_tree, monkeypatch):
+    with _with_pin(monkeypatch, sample_tree) as client:
+        assert client.get("/api/network-roots").status_code == 423
+        head = _unlock(client)
+        roots = client.get("/api/network-roots", headers=head).json()["roots"]
+        assert [r["path"] for r in roots] == [sample_tree]
+
+
+def test_a_root_can_be_added_and_removed(sample_tree, tmp_path, monkeypatch):
+    with _with_pin(monkeypatch, sample_tree) as client:
+        head = _unlock(client)
+        added = client.post("/api/network-roots",
+                            json={"path": str(tmp_path), "label": "Вторая"},
+                            headers=head)
+        assert added.status_code == 200, added.text
+        assert str(tmp_path) in [r["path"] for r in added.json()["roots"]]
+
+        gone = client.request("DELETE", "/api/network-roots",
+                              params={"path": str(tmp_path)}, headers=head)
+        assert gone.status_code == 200
+        assert str(tmp_path) not in [r["path"] for r in gone.json()["roots"]]
+
+
+def test_a_missing_root_is_not_added(sample_tree, monkeypatch):
+    with _with_pin(monkeypatch, sample_tree) as client:
+        head = _unlock(client)
+        response = client.post("/api/network-roots",
+                               json={"path": "/нет/такой/шары"}, headers=head)
+        assert response.status_code == 400
+
+
+def test_config_tells_the_page_about_the_lock(sample_tree, monkeypatch):
+    with _with_pin(monkeypatch, sample_tree) as client:
+        config = client.get("/api/config").json()
+        assert config["pin_set"] is True
+        assert config["unlocked"] is False
+        head = _unlock(client)
+        assert client.get("/api/config", headers=head).json()["unlocked"] is True
+
+
+def test_local_folders_stay_open_without_any_pin(sample_tree):
+    """Замок стоит только на сетевом: свой диск разбирается как раньше."""
+    with _client() as client:
+        job = _scan(client, sample_tree)
+        assert job["network"] is False

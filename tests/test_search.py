@@ -197,3 +197,79 @@ def test_trash_size_still_counts(tmp_path):
     assert result.root.size == 6000
     assert trash.size == 5000
     assert not trash.children, "узлы внутри корзины не нужны и не строятся"
+
+
+# --- отбор по времени последней активности ---------------------------------
+
+
+def _stale_tree():
+    """Дерево с заранее известными временами, без обращения к диску.
+
+    Настоящие ctime и birthtime подделать нельзя, поэтому дерево собирается
+    руками: проверяется отбор, а не то, как сканер читает штампы (это в
+    tests/test_scanner.py).
+    """
+    from freespace.core.model import FileNode, recompute_sizes
+
+    old, fresh = 1_000_000.0, 2_000_000.0
+    root = FileNode(path=os.sep + "root", is_dir=True)
+
+    stale = FileNode(name="архив-2019", is_dir=True)
+    stale.attach(FileNode(name="отчёт.pdf", size=500, mtime=old))
+    inner = FileNode(name="черновики", is_dir=True)
+    inner.attach(FileNode(name="draft.docx", size=300, mtime=old))
+    stale.attach(inner)
+
+    live = FileNode(name="текущее", is_dir=True)
+    live.attach(FileNode(name="старый.pdf", size=400, mtime=old))
+    live.attach(FileNode(name="свежий.pdf", size=100, mtime=fresh))
+
+    unknown = FileNode(name="без-времени", is_dir=True)
+    unknown.attach(FileNode(name="закрытый.bin", size=200, mtime=0.0))
+
+    for node in (stale, live, unknown):
+        root.attach(node)
+    recompute_sizes(root)
+    return root, old, fresh
+
+
+def test_finds_folders_where_nothing_was_touched():
+    root, _old, fresh = _stale_tree()
+    found = find(root, SearchFilter(kind=DIRS, modified_before=fresh))
+    names = {n.name for n in found}
+    assert "архив-2019" in names
+    # Внутри есть свежий файл — папка не залежалась.
+    assert "текущее" not in names
+
+
+def test_top_level_only_leaves_the_outer_folder():
+    """Разбирать будут внешнюю папку, а не каждую вложенную по отдельности."""
+    root, _old, fresh = _stale_tree()
+    found = find(root, SearchFilter(kind=DIRS, modified_before=fresh,
+                                    top_level_only=True))
+    names = {n.name for n in found}
+    assert "архив-2019" in names
+    assert "черновики" not in names
+
+
+def test_unknown_time_is_not_called_ancient():
+    """Ноль — это «прочитать не удалось», а не 1970 год: предлагать удалить то,
+    о чём ничего не известно, нельзя."""
+    root, _old, fresh = _stale_tree()
+    found = find(root, SearchFilter(modified_before=fresh))
+    names = {n.name for n in found}
+    assert "закрытый.bin" not in names
+    assert "без-времени" not in names
+
+
+def test_modified_after_finds_the_fresh_ones():
+    root, old, _fresh = _stale_tree()
+    found = find(root, SearchFilter(kind=FILES, modified_after=old))
+    assert {n.name for n in found} == {"свежий.pdf"}
+
+
+def test_date_alone_is_enough_to_search():
+    """Дата — самостоятельное условие: без неё «найти залежавшееся» упиралось бы
+    в отказ «не задано ни одного условия»."""
+    assert not SearchFilter(modified_before=time.time()).is_empty()
+    assert SearchFilter().is_empty()

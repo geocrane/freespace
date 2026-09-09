@@ -370,7 +370,7 @@ class Scanner:
                             stat = entry.stat(follow_symlinks=False)
                             size, flags = self._charge(stat, self._file_size(stat))
                             node.attach(FileNode(
-                                name=entry.name, size=size, mtime=stat.st_mtime,
+                                name=entry.name, size=size, mtime=_activity(stat),
                                 flags=flags,
                             ))
                             self._bump(entry_path)
@@ -394,16 +394,44 @@ def _dir_bytes(path: str, size_of) -> int:
     return total
 
 
+def _activity(st: os.stat_result) -> float:
+    """Когда объект в последний раз становился актуальным на этом носителе.
+
+    ``st_mtime`` — время изменения содержимого, и оно переносится вместе с
+    файлом при копировании: принесённый вчера файл честно показывает позапрошлый
+    год, и поиск «не менялось больше года» находит свежепринесённые данные.
+    Время появления здесь такого не умеет: на Windows это время создания,
+    которое ставится заново при каждом копировании, на POSIX — время изменения
+    inode, которое подделать нельзя вовсе.
+
+    Обратная сторона: массовая смена прав по всей шаре обновит ctime всем
+    файлам разом, и залежавшееся на время перестанет считаться залежавшимся.
+    Ошибка идёт в безопасную сторону — предлагать удалить лишнее хуже, чем не
+    предложить нужное.
+
+    Лишних обращений к диску не появляется: оба поля приходят одним и тем же
+    ``stat``, а на Windows ``scandir`` отдаёт их прямо из данных перечисления
+    каталога.
+    """
+    # Максимум из всех штампов, а не «birthtime, иначе ctime»: на macOS
+    # birthtime уезжает в прошлое вслед за mtime, если время файла выставили
+    # вручную, и «время создания» оказывается старше самого копирования.
+    # ``st_ctime`` такого не умеет нигде: на Windows это время создания файла на
+    # этом томе, на POSIX — время изменения inode, которое ставит ядро и в
+    # прошлое не сдвинуть.
+    return max(st.st_mtime, st.st_ctime, getattr(st, "st_birthtime", 0.0) or 0.0)
+
+
 def _safe_mtime(path: str) -> float:
     try:
-        return os.stat(_long_path(path)).st_mtime
+        return _activity(os.stat(_long_path(path)))
     except (PermissionError, OSError):
         return 0.0
 
 
 def _entry_mtime(entry: os.DirEntry) -> float:
     try:
-        return entry.stat(follow_symlinks=False).st_mtime
+        return _activity(entry.stat(follow_symlinks=False))
     except (PermissionError, OSError):
         return 0.0
 

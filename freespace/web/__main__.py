@@ -9,6 +9,8 @@ import sys
 import threading
 import webbrowser
 
+from ..core import env
+
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
@@ -50,6 +52,14 @@ def _print_urls(host: str, port: int, root_path: str, allow_delete: bool) -> Non
     if root_path:
         print(f"  root_path     {root_path!r}")
     print(f"  удаление      {'включено' if allow_delete else 'выключено'}")
+
+    from ..core import settings as settings_module
+
+    if settings_module.has_pin():
+        print("  сетевые папки скрыты до ввода PIN — кнопка «Сетевые диски» в шапке")
+        print(f"                (PIN лежит в {env.env_path()})")
+    else:
+        print(f"  сетевые папки скрыты: в {env.env_path()} не задан {env.PIN_VAR}")
     print("\n  Остановить: Ctrl+C")
     print("=" * 64, flush=True)
 
@@ -84,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     delete_group.add_argument("--no-delete", dest="allow_delete", action="store_false",
                               help="запретить удаление файлов")
     args = parser.parse_args(argv)
+
+    # Файл настроек создаётся сам: настройка PIN не должна требовать ни консоли,
+    # ни установки чего-либо — только блокнот, и то лишь чтобы сменить admin.
+    env.ensure_file()
 
     if str(args.port).lower() == "auto":
         try:

@@ -83,3 +83,53 @@ def test_iter_subtree_covers_everything():
 def test_node_has_no_dict():
     """__slots__ на месте: без него миллион узлов стоит лишних сотен мегабайт."""
     assert not hasattr(FileNode(name="x"), "__dict__")
+
+
+# --- свёртка времени последней активности ----------------------------------
+
+
+def _timed_tree():
+    """root/ старое/(два старых файла) + смешанное/(старый и свежий)."""
+    old, fresh = 1_000_000.0, 2_000_000.0
+    root = FileNode(path=os.path.join(os.sep, "tmp", "root"), is_dir=True, mtime=fresh)
+
+    stale = FileNode(name="старое", is_dir=True, mtime=fresh)
+    stale.attach(FileNode(name="a.bin", size=10, mtime=old))
+    stale.attach(FileNode(name="b.bin", size=10, mtime=old))
+
+    mixed = FileNode(name="смешанное", is_dir=True, mtime=old)
+    mixed.attach(FileNode(name="old.bin", size=10, mtime=old))
+    mixed.attach(FileNode(name="new.bin", size=10, mtime=fresh))
+
+    root.attach(stale)
+    root.attach(mixed)
+    recompute_sizes(root)
+    return root, stale, mixed, old, fresh
+
+
+def test_folder_time_is_the_newest_file_inside():
+    """Собственное время папки не учитывается: оно меняется от любой мелочи."""
+    _root, stale, mixed, old, fresh = _timed_tree()
+    # У папки было свежее собственное время, но все файлы внутри старые.
+    assert stale.mtime == old
+    # Одного свежего файла хватает, чтобы папка перестала быть залежавшейся.
+    assert mixed.mtime == fresh
+
+
+def test_folder_time_climbs_to_the_top():
+    root, _stale, _mixed, _old, fresh = _timed_tree()
+    assert root.mtime == fresh
+
+
+def test_folder_without_files_keeps_its_own_time():
+    """Файлов нет — говорить об их возрасте нечего, и пустая папка не должна
+    объявлять свежим всё дерево над собой."""
+    old, fresh = 1_000_000.0, 2_000_000.0
+    root = FileNode(path=os.sep + "tmp", is_dir=True, mtime=old)
+    empty = FileNode(name="пусто", is_dir=True, mtime=fresh)
+    root.attach(empty)
+    root.attach(FileNode(name="a.bin", size=10, mtime=old))
+    recompute_sizes(root)
+
+    assert empty.mtime == fresh
+    assert root.mtime == old

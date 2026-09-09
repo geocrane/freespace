@@ -369,12 +369,16 @@ def _splice(node: FileNode, fresh: FileNode) -> None:
 
     delta_size = node.size - old_size
     delta_count = node.file_count - old_count
-    if not delta_size and not delta_count:
-        return
+    # Свёрнутое время предков только растёт: свежий файл в пересканированной
+    # папке должен вывести из «залежавшихся» и всех её родителей. Обратный
+    # случай — единственный свежий файл исчез — потребовал бы обойти всё
+    # дерево заново, а ошибка там безопасная: папка выглядит свежее, чем есть.
     parent = node.parent
     while parent is not None:
         parent.size += delta_size
         parent.file_count += delta_count
+        if node.mtime > parent.mtime:
+            parent.mtime = node.mtime
         parent = parent.parent
 
 

@@ -64,3 +64,16 @@ def isolated_home(tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp("freespace-home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+
+
+@pytest.fixture(autouse=True)
+def isolated_env(tmp_path_factory, monkeypatch):
+    """У каждого теста свой ``.env``.
+
+    Без подмены тесты читали бы настоящий файл разработчика: PIN в нём задан, и
+    «сетевые папки закрыты» проверялось бы против чужой комбинации. По умолчанию
+    файла нет вовсе — значит, и PIN не задан, если тест не задаст его сам.
+    """
+    monkeypatch.setenv("FREESPACE_ENV",
+                       str(tmp_path_factory.mktemp("freespace-env") / ".env"))
+    monkeypatch.delenv("FREESPACE_PIN", raising=False)
